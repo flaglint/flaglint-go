@@ -40,32 +40,27 @@ release:
     owner: flaglint
     name: flaglint-go
 
-# Homebrew publishing is temporarily disabled: it needs a
-# HOMEBREW_TAP_GITHUB_TOKEN repo secret (a PAT with contents:write on the
-# separate flaglint/homebrew-tap repo) that doesn't exist yet. Rather than
-# ship v0.1.0 with a guaranteed-failing release step, this whole block is
-# commented out for the first release and will be restored (uncomment,
-# no version bump needed) in a follow-up PR once the secret is added.
 # Deprecated in goreleaser v2.10 in favor of homebrew_casks, but kept here
 # to match the existing flaglint-js formula's Formula/ convention in the
-# same tap rather than mixing Formula and Cask layouts for two related
-# products. Revisit if brews is ever removed outright, not just deprecated.
-# brews:
-#   - name: flaglint-go
-#     repository:
-#       owner: flaglint
-#       name: homebrew-tap
-#       branch: main
-#       # The default GITHUB_TOKEN is scoped to this repo only — pushing a
-#       # commit to a *different* repo (flaglint/homebrew-tap) needs a PAT
-#       # with contents:write there, stored as this repo's
-#       # HOMEBREW_TAP_GITHUB_TOKEN secret. See release.yml.
-#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-#     directory: Formula
-#     homepage: "https://github.com/flaglint/flaglint-go"
-#     description: "Native Go binary for auditing LaunchDarkly Go SDK usage — no Node.js required"
-#     license: "MIT"
-#     install: |
-#       bin.install "flaglint-go"
-#     test: |
-#       system "#{bin}/flaglint-go", "--version"
+# same tap (flaglint/homebrew-tap) rather than mixing Formula and Cask
+# layouts for two related products. Revisit if brews is ever removed
+# outright, not just deprecated.
+brews:
+  - name: flaglint-go
+    repository:
+      owner: flaglint
+      name: homebrew-tap
+      branch: main
+      # The default GITHUB_TOKEN is scoped to this repo only — pushing a
+      # commit to a *different* repo (flaglint/homebrew-tap) needs a PAT
+      # with contents:write there, stored as this repo's
+      # HOMEBREW_TAP_GITHUB_TOKEN secret. See release.yml.
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/flaglint/flaglint-go"
+    description: "Native Go binary for auditing LaunchDarkly Go SDK usage — no Node.js required"
+    license: "MIT"
+    install: |
+      bin.install "flaglint-go"
+    test: |
+      system "#{bin}/flaglint-go", "--version"
