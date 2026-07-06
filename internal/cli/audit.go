@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"github.com/flaglint/flaglint-go/internal/baseline"
@@ -42,17 +40,17 @@ func newAuditCommand(version string) *cobra.Command {
 			}
 
 			r := readiness.Compute(result.Usages)
-			fmt.Fprintf(cmd.ErrOrStderr(), "Scan complete — %d unique flag(s) across %d call site(s) (%s, %d file(s))\n",
+			stderrInfo(cmd, "Scan complete — %d unique flag(s) across %d call site(s) (%s, %d file(s))\n",
 				len(result.UniqueFlags), result.TotalUsages, formatDuration(result.ScanDurationMs), result.ScannedFiles)
 			if r.Grade == readiness.GradeNotApplicable {
-				fmt.Fprintln(cmd.ErrOrStderr(), "Migration readiness: N/A — no direct LaunchDarkly Go SDK calls detected.")
+				stderrInfo(cmd, "Migration readiness: N/A — no direct LaunchDarkly Go SDK calls detected.\n")
 			} else {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Migration readiness: %d/100 · %s\n", *r.Score, r.Grade)
-				fmt.Fprintf(cmd.ErrOrStderr(), "  %d low risk · %d medium risk · %d high risk\n",
+				stderrInfo(cmd, "Migration readiness: %d/100 · %s\n", *r.Score, r.Grade)
+				stderrInfo(cmd, "  %d low risk · %d medium risk · %d high risk\n",
 					r.LowRiskCalls, r.MediumRiskCalls, r.HighRiskCalls)
 			}
 			for _, w := range result.Warnings {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s\n", w.Kind, w.File)
+				stderrInfo(cmd, "warning: %s: %s\n", w.Kind, w.File)
 			}
 
 			if writeBaselinePath != "" {
@@ -74,7 +72,7 @@ func newAuditCommand(version string) *cobra.Command {
 					return invalidInput("%v", err)
 				}
 				uniqueCount := len(uniqueStrings(fingerprints))
-				fmt.Fprintf(cmd.ErrOrStderr(), "✓ Baseline written to %s (%d fingerprints)\n", writeBaselinePath, uniqueCount)
+				stderrInfo(cmd, "✓ Baseline written to %s (%d fingerprints)\n", writeBaselinePath, uniqueCount)
 			}
 
 			// audit, like scan, is an inventory/reporting command — always

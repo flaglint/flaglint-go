@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"github.com/flaglint/flaglint-go/internal/reporter"
@@ -39,10 +37,10 @@ func newScanCommand() *cobra.Command {
 				return invalidInput("%v", err)
 			}
 
-			fmt.Fprintf(cmd.ErrOrStderr(), "Scan complete — %d unique flag(s) across %d call site(s) (%s, %d file(s))\n",
+			stderrInfo(cmd, "Scan complete — %d unique flag(s) across %d call site(s) (%s, %d file(s))\n",
 				len(result.UniqueFlags), result.TotalUsages, formatDuration(result.ScanDurationMs), result.ScannedFiles)
 			for _, w := range result.Warnings {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s\n", w.Kind, w.File)
+				stderrInfo(cmd, "warning: %s: %s\n", w.Kind, w.File)
 			}
 
 			// scan is an inventory command — enforcement exit codes belong

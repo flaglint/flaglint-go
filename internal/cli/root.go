@@ -45,13 +45,13 @@ func classifyResult(err error) int {
 		return ExitSuccess
 	}
 	if exitErr, ok := err.(*ExitError); ok {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", exitErr.Message)
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %s\n", exitErr.Message)
 		return exitErr.Code
 	}
 	// Any error not already classified as an *ExitError (a cobra flag-
 	// parsing error, for instance) is treated as invalid input, not an
 	// internal error — it means the user's invocation was malformed.
-	fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
+	_, _ = fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
 	return ExitInvalidInput
 }
 

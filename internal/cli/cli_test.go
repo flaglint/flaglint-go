@@ -19,7 +19,10 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dir)
+	// NOT a `defer os.RemoveAll(dir)` — os.Exit below bypasses every
+	// deferred function in this goroutine, so a deferred cleanup here
+	// would silently never run on any test invocation. Clean up
+	// explicitly before exiting instead.
 
 	binName := "flaglint-go"
 	if runtime.GOOS == "windows" {
@@ -36,7 +39,9 @@ func TestMain(m *testing.M) {
 		panic("build failed: " + err.Error() + "\n" + string(out))
 	}
 
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 func mustGetwd() string {
