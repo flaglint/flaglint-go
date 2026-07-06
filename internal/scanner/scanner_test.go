@@ -118,6 +118,26 @@ func TestScanFile_positiveVariety(t *testing.T) {
 	}
 }
 
+func TestScanFile_positivePackageVarIIFE(t *testing.T) {
+	usages := parseFixture(t, "positive_package_var_iife.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1 — a real client construction inside an IIFE assigned to a package var must be scanned: %+v", len(usages), usages)
+	}
+	if usages[0].FlagKey != "startup-flag" {
+		t.Errorf("usages[0].FlagKey = %q, want startup-flag", usages[0].FlagKey)
+	}
+}
+
+func TestScanFile_positiveParenthesizedCalls(t *testing.T) {
+	usages := parseFixture(t, "positive_parenthesized_calls.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1 — parenthesized constructor/method calls must still be recognized: %+v", len(usages), usages)
+	}
+	if usages[0].FlagKey != "paren-flag" {
+		t.Errorf("usages[0].FlagKey = %q, want paren-flag", usages[0].FlagKey)
+	}
+}
+
 // ── False-positive guards (ADR 002's non-negotiable rule) ──────────────────
 
 func TestScanFile_falsePositiveNoSDKImport(t *testing.T) {
@@ -148,5 +168,15 @@ func TestScanFile_falsePositiveCrossFunctionShadowing(t *testing.T) {
 	}
 	if usages[0].FlagKey != "real-flag" {
 		t.Errorf("usages[0].FlagKey = %q, want real-flag (runB's unrelated \"client\" must not leak in)", usages[0].FlagKey)
+	}
+}
+
+func TestScanFile_falsePositiveCrossTypeFieldCollision(t *testing.T) {
+	usages := parseFixture(t, "false_positive_cross_type_field_collision.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want exactly 1 (only RealService.Client) — field bindings must be type-qualified, not keyed on receiver variable name alone: %+v", len(usages), usages)
+	}
+	if usages[0].FlagKey != "real-field-flag" {
+		t.Errorf("usages[0].FlagKey = %q, want real-field-flag (FakeService's unrelated \"s.Client\" must not leak in)", usages[0].FlagKey)
 	}
 }
