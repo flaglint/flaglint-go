@@ -62,6 +62,14 @@ func newAuditCommand(version string) *cobra.Command {
 						fingerprints = append(fingerprints, u.Fingerprint)
 					}
 				}
+				// invalidInput (exit 2), even for an OS-level write failure
+				// (disk full, permission denied), not internalError (exit
+				// 3) — this looks arguably wrong in isolation (exit 3 reads
+				// like the better fit for an unexpected I/O failure), but
+				// it's deliberate parity with flaglint-js's BaselineError,
+				// whose default exitCode is 2 for every failure mode
+				// including write failures (src/baseline.ts's writeBaseline
+				// throws BaselineError with no explicit exitCode override).
 				if err := baseline.Write(writeBaselinePath, fingerprints, version); err != nil {
 					return invalidInput("%v", err)
 				}

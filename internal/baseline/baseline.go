@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -63,8 +64,20 @@ func Read(path string) (map[string]bool, error) {
 		return nil, errf(`unsupported baseline version in %s. Expected version "1"`, path)
 	}
 
+	// A literal JSON `null` for fingerprints must be rejected the same as a
+	// missing or malformed array: json.Unmarshal("null", &fingerprints)
+	// succeeds with err == nil (Go's null-into-slice semantics leave it
+	// nil), which would otherwise silently treat a corrupt baseline as a
+	// valid empty one — every current finding would then look "new" under
+	// --fail-on-new instead of failing loudly with the expected exit 2.
+	// The TS reference doesn't have this gap: Array.isArray(null) is false,
+	// so its equivalent check rejects null for free.
+	rawFingerprints, ok := obj["fingerprints"]
+	if !ok || strings.TrimSpace(string(rawFingerprints)) == "null" {
+		return nil, errf("baseline file is missing a valid 'fingerprints' array: %s", path)
+	}
 	var fingerprints []string
-	if raw, ok := obj["fingerprints"]; !ok || json.Unmarshal(raw, &fingerprints) != nil {
+	if json.Unmarshal(rawFingerprints, &fingerprints) != nil {
 		return nil, errf("baseline file is missing a valid 'fingerprints' array: %s", path)
 	}
 

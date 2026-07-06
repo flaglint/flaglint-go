@@ -118,6 +118,21 @@ func TestRead_versionAsNumberRejected(t *testing.T) {
 	}
 }
 
+func TestRead_nullFingerprintsRejected(t *testing.T) {
+	// A literal JSON null must be rejected the same as a missing/malformed
+	// array — Go's json.Unmarshal("null", &slice) succeeds with a nil
+	// result, which would otherwise silently accept this as a valid empty
+	// baseline instead of failing loudly (exit 2).
+	path := filepath.Join(t.TempDir(), "baseline.json")
+	if err := os.WriteFile(path, []byte(`{"version": "1", "fingerprints": null}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Read(path)
+	if err == nil {
+		t.Fatal("Read() error = nil, want error for null fingerprints")
+	}
+}
+
 func TestRead_missingFingerprintsArray(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "baseline.json")
 	if err := os.WriteFile(path, []byte(`{"version": "1"}`), 0o644); err != nil {

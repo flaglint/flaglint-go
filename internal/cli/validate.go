@@ -61,6 +61,16 @@ func newValidateCommand() *cobra.Command {
 			} else {
 				report = validator.FormatReport(vResult, vOpts)
 			}
+			// The report is written BEFORE the baseline check below runs —
+			// so a report claiming the --no-direct-launchdarkly policy
+			// passed can still be followed by an exit-1/exit-2 from a
+			// baseline failure. This looks like a bug in isolation, but
+			// it's deliberate parity with flaglint-js's validate.ts, which
+			// has the identical ordering (write report -> baseline check ->
+			// final exit decision). Reordering here would fix the Go
+			// side's UX rough edge at the cost of making the two tools'
+			// documented behavior diverge — worse for ADR 003's whole
+			// purpose. If this changes, it should change in both repos.
 			if writeErr := writeReport(cmd, strings.TrimRight(report, "\n"), output); writeErr != nil {
 				return writeErr
 			}

@@ -119,6 +119,15 @@ type sarifResultProperties struct {
 	IsDynamic bool   `json:"isDynamic"`
 }
 
+// sarifURI normalizes path separators only — it does not percent-encode
+// spaces or non-ASCII characters, unlike sarifScanRootURI below. That
+// inconsistency is intentional parity with the TS reference's own
+// sarifViolationUri/sarifUri (src/validator/index.ts, src/reporter/index.ts),
+// which does the identical bare slash-normalization for per-result relative
+// URIs while only escaping the base URI via pathToFileURL. Fixing it only
+// here would make the two tools' SARIF output diverge for paths containing
+// spaces — verified against the TS source before treating this as
+// deliberate rather than a gap to close.
 func sarifURI(file string) string {
 	return strings.ReplaceAll(file, `\`, "/")
 }
