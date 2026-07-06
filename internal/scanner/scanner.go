@@ -1,7 +1,8 @@
 // Package scanner detects github.com/launchdarkly/go-server-sdk (v6/v7)
 // call sites in Go source. Client identity is proven through import-alias
-// tracing and constructor-call binding — never through name matching alone.
-// See docs/adr/002-client-identity-model.md.
+// tracing, constructor-call binding, and (as of the whole-scan pre-pass
+// below) cross-file struct-field and factory-function resolution — never
+// through name matching alone. See docs/adr/002-client-identity-model.md.
 package scanner
 
 import (
@@ -11,12 +12,27 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/flaglint/flaglint-go/internal/config"
 	"github.com/flaglint/flaglint-go/internal/fingerprint"
 	"github.com/flaglint/flaglint-go/internal/types"
 )
+
+// parsedFile is one successfully parsed source file, kept in memory for
+// the whole scan (rather than discarded after each file, as Phase 1
+// originally did) because the whole-scan pre-pass below needs to see
+// every file before any single file can be fully resolved: a struct's
+// field types, a factory function's return type, and a package-level var
+// binding are all frequently declared in a *different* file than where
+// they're used — sometimes in a different package entirely.
+type parsedFile struct {
+	relPath string
+	dir     string
+	file    *ast.File
+	imports sdkImports
+}
 
 // Scan walks root for files matching cfg's include/exclude patterns, parses
 // each as Go source, and returns every detected LaunchDarkly Go SDK call
@@ -41,8 +57,10 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 	// null — a clean scan must report `"usages": []`, not `"usages": null`,
 	// to match the cross-tool JSON contract (ADR 003) and not break a
 	// consumer doing `result.usages.map(...)` or `jq '.usages[]'`.
-	allUsages := []types.FlagUsage{}
 	warnings := []types.ScanWarning{}
+
+	fset := token.NewFileSet()
+	var parsed []parsedFile
 
 	for _, rel := range relFiles {
 		full := filepath.Join(absRoot, rel)
@@ -53,16 +71,20 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 			})
 			continue
 		}
-
-		fset := token.NewFileSet()
 		file, err := parser.ParseFile(fset, full, src, parser.SkipObjectResolution)
 		if err != nil {
 			warnings = append(warnings, types.ScanWarning{Kind: "parse-failure", File: rel})
 			continue
 		}
-
-		allUsages = append(allUsages, scanFile(fset, file, rel)...)
+		parsed = append(parsed, parsedFile{
+			relPath: rel,
+			dir:     filepath.Dir(full),
+			file:    file,
+			imports: traceSDKImports(file),
+		})
 	}
+
+	allUsages := runWholeScanAnalysis(fset, absRoot, parsed)
 
 	return types.ScanResult{
 		ScannedAt:      time.Now().UTC().Format(time.RFC3339),
@@ -76,48 +98,153 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 	}, nil
 }
 
-// scanFile detects LaunchDarkly SDK call sites in a single parsed file.
-// relPath is the file's path relative to the scan root (never to a go.mod
-// boundary) — see docs/adr/003-cross-tool-contract.md for why: module-
-// relative paths would collide across sibling modules with identically
-// named files, corrupting fingerprints.
-//
-// Bindings are scoped per top-level function/method/closure (see
-// collectScopedBindings) rather than tracked in one flat file-wide map: a
-// same-named variable bound to an unrelated value in a different function
-// must never be mistaken for this scope's client. dynamicIndex is still a
-// single counter for the whole file, matching flaglint-js's per-file
-// (not per-function) numbering.
-//
-// Known Phase 1 gap: a method value taken from a bound client
-// (`f := client.BoolVariation; f(...)`) is not detected — detection
-// requires the method to be called directly through a selector expression
-// at the call site itself. This is the same class of indirection ADR 002
-// already defers to the opt-in --strict-types pass, not a new exception.
-func scanFile(fset *token.FileSet, file *ast.File, relPath string) []types.FlagUsage {
-	imports := traceSDKImports(file)
-	if !imports.present() {
-		return nil
+// runWholeScanAnalysis is Scan's core: a pre-pass that builds cross-file
+// identity-resolution state, followed by two binding-discovery passes and
+// a final detection pass. See docs/adr/002-client-identity-model.md for
+// why this exists — found necessary by field-testing against real-world
+// code (the official launchdarkly-labs/ld-sample-app-go, weaviate,
+// e2b-dev/infra, CMS-Enterprise/mint-app), every one of which wraps the
+// client behind a struct field, a factory/getter function, or a
+// multi-level field chain declared in a different file (sometimes a
+// different package) than where it's used.
+func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFile) []types.FlagUsage {
+	modulePath, moduleRoot, hasModule := findModule(absRoot)
+
+	// Pre-pass 1: package identity. ownPkgKey identifies each file's own
+	// package (for same-package bare factory calls); importPathToPkgKey and
+	// importPathToPkgName let OTHER files resolve a qualified
+	// `pkgAlias.FuncName()` call back to one of our own scanned packages
+	// (see factory.go) — never a name-based guess, only real import-path
+	// matching when a go.mod is present.
+	ownPkgKey := make(map[*ast.File]string, len(parsed))
+	importPathToPkgKey := map[string]string{}
+	importPathToPkgName := map[string]string{}
+	for _, pf := range parsed {
+		key := pkgKeyFor(pf.dir, modulePath, moduleRoot, hasModule)
+		ownPkgKey[pf.file] = key
+		if !hasModule {
+			continue
+		}
+		importPath, err := packageImportPath(modulePath, moduleRoot, pf.dir)
+		if err != nil {
+			continue
+		}
+		importPathToPkgKey[importPath] = key
+		name := pf.file.Name.Name
+		if existing, ok := importPathToPkgName[importPath]; !ok || (strings.HasSuffix(existing, "_test") && !strings.HasSuffix(name, "_test")) {
+			importPathToPkgName[importPath] = name
+		}
 	}
 
-	// base holds bindings visible to every scope in the file: package-level
-	// `var` bindings and struct-field bindings (both are not function-scoped
-	// in real Go semantics — see collectFieldBindings). Local variable
-	// bindings are layered on top of this per function/closure scope.
-	base := mergeBindings(
-		collectPackageLevelBindings(file, imports),
-		collectFieldBindings(file, imports),
-	)
+	// Pre-pass 2: struct field types (every file, regardless of whether it
+	// imports the SDK itself — the file declaring a wrapper struct often
+	// doesn't) and factory functions (naturally a no-op for a file with no
+	// SDK import, since returnsSDKClient checks against that file's own
+	// traced aliases).
+	structFieldTypes := map[string]string{}
+	factoryFunctions := map[factoryKey]string{}
+	for _, pf := range parsed {
+		for k, v := range collectStructFieldTypes(pf.file) {
+			structFieldTypes[k] = v
+		}
+		collectFactoryFunctions(pf.file, ownPkgKey[pf.file], pf.imports, factoryFunctions)
+	}
 
-	d := &fileDetector{fset: fset, relPath: relPath}
+	// Pre-pass 3: per-file contexts, now that every whole-scan index above
+	// is complete.
+	ctxs := make(map[*ast.File]fileContext, len(parsed))
+	for _, pf := range parsed {
+		ctxs[pf.file] = fileContext{
+			imports:          pf.imports,
+			ownPkgKey:        ownPkgKey[pf.file],
+			importAliases:    resolveImportAliases(pf.file, importPathToPkgKey, importPathToPkgName),
+			factoryFunctions: factoryFunctions,
+			structFieldTypes: structFieldTypes,
+		}
+	}
 
+	// Pass A: package-level vars, direct field assignments, and every
+	// function scope's local bindings — merged into one whole-scan `base`.
+	// Struct fields and package vars are not function- or file-scoped in
+	// real Go semantics (ADR 002), so — unlike local variables — they're
+	// resolved across the entire scan, not per file.
+	base := map[string]string{}
+	fileScopes := make(map[*ast.File][]funcScope, len(parsed))
+	for _, pf := range parsed {
+		ctx := ctxs[pf.file]
+		for k, v := range collectPackageLevelBindings(pf.file, ctx) {
+			base[k] = v
+		}
+		for k, v := range collectFieldBindings(pf.file, ctx) {
+			base[k] = v
+		}
+		fileScopes[pf.file] = collectFuncScopes(pf.file, ctx.imports)
+	}
+
+	// Pass B: composite-literal field bindings (`&LDIntegration{ldClient:
+	// ldClient}`) — each scope's own local bindings are needed as context
+	// (the value stored might be a local variable bound earlier in the
+	// same function, not just a direct constructor call), so this can't
+	// run until every scope's local bindings are computable, which needs
+	// `base` from Pass A first.
+	for _, pf := range parsed {
+		ctx := ctxs[pf.file]
+		for _, s := range fileScopes[pf.file] {
+			local := collectScopedBindings(s.body, mergeBindings(base, s.paramBindings), ctx)
+			for k, v := range collectCompositeLiteralFieldBindings(s.body, local, ctx) {
+				base[k] = v
+			}
+		}
+	}
+
+	// Pass C: detection, with the now-complete binding set — a composite
+	// literal in one file/function can make a field binding visible to a
+	// different file processed earlier in this loop.
+	var allUsages []types.FlagUsage
+	for _, pf := range parsed {
+		ctx := ctxs[pf.file]
+		d := &fileDetector{fset: fset, relPath: pf.relPath}
+		for _, s := range fileScopes[pf.file] {
+			d.detect(s.body, collectScopedBindings(s.body, mergeBindings(base, s.paramBindings), ctx), s.declared, ctx.structFieldTypes)
+		}
+		allUsages = append(allUsages, d.usages...)
+	}
+
+	if allUsages == nil {
+		allUsages = []types.FlagUsage{}
+	}
+	return allUsages
+}
+
+// funcScope is one function/method/closure body worth detecting usages in,
+// paired with its receiver/parameter declared types (needed to resolve
+// field-selector receivers — see qualifiedFieldKey) and any parameter/
+// receiver bindings established purely by a declared `*ld.LDClient`
+// parameter type (see paramClientBindings — no assignment to trace at
+// all, the type annotation alone proves identity).
+type funcScope struct {
+	body          *ast.BlockStmt
+	declared      map[string]string
+	paramBindings map[string]string
+}
+
+// collectFuncScopes enumerates every top-level function/method body in
+// file, plus any function literal nested inside a top-level `var`
+// initializer (an immediately-invoked closure, or one passed as an
+// argument) — not just a directly-assigned `var x = func(){...}`.
+func collectFuncScopes(file *ast.File, imports sdkImports) []funcScope {
+	var scopes []funcScope
 	for _, decl := range file.Decls {
 		switch n := decl.(type) {
 		case *ast.FuncDecl:
 			if n.Body == nil {
 				continue // external/assembly function, no body to scan
 			}
-			d.detect(n.Body, collectScopedBindings(n.Body, base, imports), declaredParamTypes(n))
+			scopes = append(scopes, funcScope{
+				body:          n.Body,
+				declared:      declaredParamTypes(n),
+				paramBindings: paramClientBindings(n.Type.Params, imports),
+			})
 		case *ast.GenDecl:
 			if n.Tok != token.VAR {
 				continue
@@ -128,26 +255,23 @@ func scanFile(fset *token.FileSet, file *ast.File, relPath string) []types.FlagU
 					continue
 				}
 				for _, val := range vs.Values {
-					// Not just a direct `var x = func(){...}` — also catches
-					// an immediately-invoked func literal (`var x =
-					// func(){...}()`) or one passed as an argument, by
-					// finding every FuncLit nested anywhere in the
-					// initializer expression rather than requiring it to
-					// be the initializer itself.
 					ast.Inspect(val, func(inner ast.Node) bool {
 						lit, ok := inner.(*ast.FuncLit)
 						if !ok {
 							return true
 						}
-						d.detect(lit.Body, collectScopedBindings(lit.Body, base, imports), paramTypesFromFuncLit(lit))
+						scopes = append(scopes, funcScope{
+							body:          lit.Body,
+							declared:      paramTypesFromFuncLit(lit),
+							paramBindings: paramClientBindings(lit.Type.Params, imports),
+						})
 						return true
 					})
 				}
 			}
 		}
 	}
-
-	return d.usages
+	return scopes
 }
 
 // fileDetector accumulates findings across every scope walked in one file,
@@ -160,7 +284,12 @@ type fileDetector struct {
 	usages       []types.FlagUsage
 }
 
-func (d *fileDetector) detect(scope ast.Node, bindings map[string]string, declared map[string]string) {
+// Known Phase 1 gap: a method value taken from a bound client
+// (`f := client.BoolVariation; f(...)`) is not detected — detection
+// requires the method to be called directly through a selector expression
+// at the call site itself. This is the same class of indirection ADR 002
+// already defers to the opt-in --strict-types pass, not a new exception.
+func (d *fileDetector) detect(scope ast.Node, bindings, declared, structFieldTypes map[string]string) {
 	ast.Inspect(scope, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -170,7 +299,7 @@ func (d *fileDetector) detect(scope ast.Node, bindings map[string]string, declar
 		if !ok {
 			return true
 		}
-		receiver := resolveReceiver(sel.X, declared)
+		receiver := resolveReceiver(sel.X, declared, structFieldTypes)
 		if receiver == "" {
 			return true
 		}

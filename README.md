@@ -18,12 +18,16 @@ standard `go/parser`/`go/ast` directly — no tree-sitter, no Node runtime. See
 [docs/adr/001-native-go-parser.md](docs/adr/001-native-go-parser.md) for the
 full rationale.
 
-Client identity is proven through import-alias tracing and constructor-call
-binding — never by variable or function name alone (see
-[docs/adr/002-client-identity-model.md](docs/adr/002-client-identity-model.md)).
-An opt-in `go/types`-verified pass for deeper indirection (factory functions,
-interface satisfaction) is designed but **not yet implemented** — today's
-scanner is syntax-only, no build required.
+Client identity is proven through import-alias tracing, constructor-call
+binding, and whole-scan syntactic resolution of common indirection (struct
+fields, composite literals, multi-level field chains, factory/getter
+functions, typed parameters) — never by variable or function name alone
+(see [docs/adr/002-client-identity-model.md](docs/adr/002-client-identity-model.md)
+and [docs/adr/004-whole-scan-identity-resolution.md](docs/adr/004-whole-scan-identity-resolution.md)).
+Deeper indirection that can't be proven from declared types alone (method
+values, interface satisfaction, transitive factory wrapping) is deferred to
+an opt-in `go/types`-verified pass, designed but **not yet implemented** —
+today's scanner is syntax-only, no build required.
 
 ## Scope (current)
 

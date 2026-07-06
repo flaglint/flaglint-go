@@ -9,15 +9,44 @@ import (
 	"github.com/flaglint/flaglint-go/internal/types"
 )
 
+// parseFixture parses a single fixture file in isolation and runs it
+// through the same whole-scan analysis Scan() uses, with a "scan" of
+// exactly one file — the cross-file passes (struct field types, factory
+// functions, package-level bindings) degrade naturally to single-file
+// behavior when there's only one file to analyze, so this remains a valid
+// way to test a self-contained fixture. Fixtures that specifically
+// exercise cross-file resolution use parseFixtures (plural) instead.
 func parseFixture(t *testing.T, name string) []types.FlagUsage {
 	t.Helper()
-	path := filepath.Join("testdata", "fixtures", name)
+	return parseFixtures(t, name)
+}
+
+func parseFixtures(t *testing.T, names ...string) []types.FlagUsage {
+	t.Helper()
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("ParseFile(%s) error = %v", name, err)
+	var parsed []parsedFile
+	for _, name := range names {
+		path := filepath.Join("testdata", "fixtures", name)
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("ParseFile(%s) error = %v", name, err)
+		}
+		absDir, err := filepath.Abs(filepath.Dir(path))
+		if err != nil {
+			t.Fatalf("Abs(%s) error = %v", path, err)
+		}
+		parsed = append(parsed, parsedFile{
+			relPath: name,
+			dir:     absDir,
+			file:    file,
+			imports: traceSDKImports(file),
+		})
 	}
-	return scanFile(fset, file, name)
+	absRoot, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("Abs(.) error = %v", err)
+	}
+	return runWholeScanAnalysis(fset, absRoot, parsed)
 }
 
 func TestScanFile_positiveBasic(t *testing.T) {
@@ -77,6 +106,93 @@ func TestScanFile_positiveDotImport(t *testing.T) {
 	}
 	if got := usages[0]; got.FlagKey != "dot-import-flag" {
 		t.Errorf("usages[0] = %+v, want dot-import-flag", got)
+	}
+}
+
+func TestScanFile_positiveCompositeLiteral(t *testing.T) {
+	usages := parseFixture(t, "positive_composite_literal.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "composite-literal-flag" {
+		t.Errorf("usages[0] = %+v, want composite-literal-flag (via &CompositeIntegration{ldClient: client})", got)
+	}
+}
+
+func TestScanFile_falsePositiveCompositeLiteralUnbound(t *testing.T) {
+	usages := parseFixture(t, "false_positive_composite_literal_unbound.go")
+	if len(usages) != 0 {
+		t.Errorf("got %d usages, want 0 — composite-literal field value that never resolves to a bound client must not be detected: %+v", len(usages), usages)
+	}
+}
+
+func TestScanFiles_positiveMultiLevelChain(t *testing.T) {
+	usages := parseFixtures(t, "positive_multilevel_types.go", "positive_multilevel_usage.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "multilevel-flag" {
+		t.Errorf("usages[0] = %+v, want multilevel-flag (via f.integ.ldClient, a two-level chain resolved across files)", got)
+	}
+}
+
+func TestScanFile_positiveParamTypedClient(t *testing.T) {
+	usages := parseFixture(t, "positive_param_typed_client.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "param-typed-flag" {
+		t.Errorf("usages[0] = %+v, want param-typed-flag (client passed in as a plain *ld.LDClient parameter, no assignment to trace)", got)
+	}
+}
+
+func TestScanFile_falsePositiveParamTypedUnrelated(t *testing.T) {
+	usages := parseFixture(t, "false_positive_param_typed_unrelated.go")
+	if len(usages) != 0 {
+		t.Errorf("got %d usages, want 0 — a same-named *LDClient parameter type with no traced SDK import must not be detected: %+v", len(usages), usages)
+	}
+}
+
+func TestScanFile_positiveGenericReceiver(t *testing.T) {
+	usages := parseFixture(t, "positive_generic_receiver.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "generic-receiver-flag" {
+		t.Errorf("usages[0] = %+v, want generic-receiver-flag (method on a generic struct, receiver type *ast.IndexExpr)", got)
+	}
+}
+
+func TestScanFiles_positiveCrossFilePackageVar(t *testing.T) {
+	usages := parseFixtures(t, "positive_crossfile_pkgvar_a.go", "positive_crossfile_pkgvar_b.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "crossfile-pkgvar-flag" {
+		t.Errorf("usages[0] = %+v, want crossfile-pkgvar-flag (package var bound in one file, used in another)", got)
+	}
+}
+
+func TestScanFiles_positiveCrossPackageFactoryFunction(t *testing.T) {
+	usages := parseFixtures(t,
+		"crosspkg/producer/client.go",
+		"crosspkg/consumer/main.go",
+	)
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "cross-package-flag" {
+		t.Errorf("usages[0] = %+v, want cross-package-flag (via producer.GetLdClient(), a cross-package factory function)", got)
+	}
+}
+
+func TestScanFiles_falsePositiveCrossPackageFactoryFunctionUnrelated(t *testing.T) {
+	usages := parseFixtures(t,
+		"crosspkg/unrelated_producer/client.go",
+		"crosspkg/consumer_of_unrelated/main.go",
+	)
+	if len(usages) != 0 {
+		t.Errorf("got %d usages, want 0 — a same-named factory function returning an unrelated type must not be detected: %+v", len(usages), usages)
 	}
 }
 
