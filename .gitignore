@@ -1,0 +1,21 @@
+# Build artifacts
+/bin/
+/dist/
+/flaglint-go
+/flaglint-go.exe
+
+# Go
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# goreleaser
+/dist/
