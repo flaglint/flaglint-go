@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"go/ast"
+	"go/token"
 	"strconv"
 )
 
@@ -88,28 +89,81 @@ func isConstructorName(name string) bool {
 	return name == "MakeClient" || name == "MakeCustomClient"
 }
 
-// collectClientBindings finds every variable, package-level var, or struct
-// field that is directly assigned the result of a verified SDK constructor
-// call, and records which SDK version it was constructed from. Binding is
-// tracked by identifier/selector text within the file — Phase 1 does not
-// require full type information (see ADR 002); indirection through a
-// factory function or interface satisfaction is a known Phase 1 gap,
-// deferred to the opt-in --strict-types pass.
-func collectClientBindings(file *ast.File, imports sdkImports) map[string]string {
+// collectPackageLevelBindings finds client bindings established by
+// top-level `var` declarations (file.Decls only — never descends into a
+// function body), which are visible to every function in the file.
+func collectPackageLevelBindings(file *ast.File, imports sdkImports) map[string]string {
 	bindings := map[string]string{}
-
-	record := func(lhs ast.Expr, version string) {
-		switch e := lhs.(type) {
-		case *ast.Ident:
-			if e.Name != "_" {
-				bindings[e.Name] = version
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
 			}
-		case *ast.SelectorExpr:
-			bindings[exprString(e)] = version
+			bindFromValueSpec(vs, imports, bindings)
 		}
 	}
+	return bindings
+}
 
+// collectFieldBindings finds every struct-field client binding (e.g.
+// "s.Client, _ = ld.MakeClient(...)") anywhere in the file. Unlike local
+// variables, a struct field is not function-scoped in real Go semantics —
+// it represents object state that is legitimately set in one method and
+// used from a completely different one (a constructor/setup method and the
+// methods that use the client it configured). So field bindings are
+// collected file-wide, in contrast to local identifier bindings, which are
+// scoped per function by collectScopedBindings below.
+func collectFieldBindings(file *ast.File, imports sdkImports) map[string]string {
+	bindings := map[string]string{}
 	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, rhs := range assign.Rhs {
+			call, ok := rhs.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			version, ok := isSDKConstructorCall(call, imports)
+			if !ok || i >= len(assign.Lhs) {
+				continue
+			}
+			if sel, ok := assign.Lhs[i].(*ast.SelectorExpr); ok {
+				bindings[exprString(sel)] = version
+			}
+		}
+		return true
+	})
+	return bindings
+}
+
+// collectScopedBindings returns a copy of base extended with every *local
+// variable* client binding established anywhere within scope (typically
+// one top-level function or method body) — struct-field bindings are
+// intentionally not tracked here; see collectFieldBindings. A fresh copy is
+// returned per top-level function/closure so that a same-named local
+// variable bound to an unrelated value in a *different* function is never
+// mistaken for this scope's client — the flat, whole-file binding table
+// this replaced had exactly that false-positive risk. Nested closures
+// (ast.Inspect descends into FuncLit automatically) correctly continue to
+// see their enclosing function's bindings, because they are walked as part
+// of the same scope.
+//
+// Indirection through a factory function or interface satisfaction is a
+// known Phase 1 gap, deferred to the opt-in --strict-types pass (ADR 002).
+func collectScopedBindings(scope ast.Node, base map[string]string, imports sdkImports) map[string]string {
+	bindings := make(map[string]string, len(base))
+	for k, v := range base {
+		bindings[k] = v
+	}
+
+	ast.Inspect(scope, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
 			for i, rhs := range node.Rhs {
@@ -121,25 +175,51 @@ func collectClientBindings(file *ast.File, imports sdkImports) map[string]string
 				if !ok || i >= len(node.Lhs) {
 					continue
 				}
-				record(node.Lhs[i], version)
+				// Only plain identifiers here — struct-field assignments
+				// are handled file-wide by collectFieldBindings, not
+				// scoped to this function.
+				if ident, ok := node.Lhs[i].(*ast.Ident); ok && ident.Name != "_" {
+					bindings[ident.Name] = version
+				}
 			}
 		case *ast.ValueSpec:
-			for i, rhs := range node.Values {
-				call, ok := rhs.(*ast.CallExpr)
-				if !ok {
-					continue
-				}
-				version, ok := isSDKConstructorCall(call, imports)
-				if !ok || i >= len(node.Names) {
-					continue
-				}
-				bindings[node.Names[i].Name] = version
-			}
+			bindFromValueSpec(node, imports, bindings)
 		}
 		return true
 	})
 
 	return bindings
+}
+
+// mergeBindings returns a new map containing every entry from both inputs;
+// b's entries win on key collision (there should never be one in practice,
+// since package-level and struct-field bindings key on disjoint identifier
+// shapes).
+func mergeBindings(a, b map[string]string) map[string]string {
+	merged := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		merged[k] = v
+	}
+	for k, v := range b {
+		merged[k] = v
+	}
+	return merged
+}
+
+func bindFromValueSpec(vs *ast.ValueSpec, imports sdkImports, bindings map[string]string) {
+	for i, rhs := range vs.Values {
+		call, ok := rhs.(*ast.CallExpr)
+		if !ok {
+			continue
+		}
+		version, ok := isSDKConstructorCall(call, imports)
+		if !ok || i >= len(vs.Names) {
+			continue
+		}
+		if vs.Names[i].Name != "_" {
+			bindings[vs.Names[i].Name] = version
+		}
+	}
 }
 
 // exprString renders a simple identifier or selector chain (e.g. "s.Client")

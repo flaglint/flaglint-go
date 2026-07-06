@@ -140,3 +140,13 @@ func TestScanFile_falsePositiveUnrelatedMakeClient(t *testing.T) {
 		t.Errorf("got %d usages, want 0 — a local MakeClient function unrelated to the SDK import must not be detected: %+v", len(usages), usages)
 	}
 }
+
+func TestScanFile_falsePositiveCrossFunctionShadowing(t *testing.T) {
+	usages := parseFixture(t, "false_positive_cross_function_shadowing.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want exactly 1 (only runA's real client) — bindings must be scoped per function, not shared across sibling functions: %+v", len(usages), usages)
+	}
+	if usages[0].FlagKey != "real-flag" {
+		t.Errorf("usages[0].FlagKey = %q, want real-flag (runB's unrelated \"client\" must not leak in)", usages[0].FlagKey)
+	}
+}

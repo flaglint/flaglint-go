@@ -78,21 +78,72 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 // boundary) — see docs/adr/003-cross-tool-contract.md for why: module-
 // relative paths would collide across sibling modules with identically
 // named files, corrupting fingerprints.
+//
+// Bindings are scoped per top-level function/method/closure (see
+// collectScopedBindings) rather than tracked in one flat file-wide map: a
+// same-named variable bound to an unrelated value in a different function
+// must never be mistaken for this scope's client. dynamicIndex is still a
+// single counter for the whole file, matching flaglint-js's per-file
+// (not per-function) numbering.
 func scanFile(fset *token.FileSet, file *ast.File, relPath string) []types.FlagUsage {
 	imports := traceSDKImports(file)
 	if !imports.present() {
 		return nil
 	}
 
-	bindings := collectClientBindings(file, imports)
-	if len(bindings) == 0 {
-		return nil
+	// base holds bindings visible to every scope in the file: package-level
+	// `var` bindings and struct-field bindings (both are not function-scoped
+	// in real Go semantics — see collectFieldBindings). Local variable
+	// bindings are layered on top of this per function/closure scope.
+	base := mergeBindings(
+		collectPackageLevelBindings(file, imports),
+		collectFieldBindings(file, imports),
+	)
+
+	d := &fileDetector{fset: fset, relPath: relPath}
+
+	for _, decl := range file.Decls {
+		switch n := decl.(type) {
+		case *ast.FuncDecl:
+			if n.Body == nil {
+				continue // external/assembly function, no body to scan
+			}
+			d.detect(n.Body, collectScopedBindings(n.Body, base, imports))
+		case *ast.GenDecl:
+			if n.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range n.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, val := range vs.Values {
+					lit, ok := val.(*ast.FuncLit)
+					if !ok {
+						continue
+					}
+					d.detect(lit.Body, collectScopedBindings(lit.Body, base, imports))
+				}
+			}
+		}
 	}
 
-	var usages []types.FlagUsage
-	dynamicIndex := 0
+	return d.usages
+}
 
-	ast.Inspect(file, func(n ast.Node) bool {
+// fileDetector accumulates findings across every scope walked in one file,
+// sharing a single dynamicIndex counter (per-file, not per-scope) to match
+// flaglint-js's numbering.
+type fileDetector struct {
+	fset         *token.FileSet
+	relPath      string
+	dynamicIndex int
+	usages       []types.FlagUsage
+}
+
+func (d *fileDetector) detect(scope ast.Node, bindings map[string]string) {
+	ast.Inspect(scope, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -114,19 +165,19 @@ func scanFile(fset *token.FileSet, file *ast.File, relPath string) []types.FlagU
 			return true
 		}
 
-		pos := fset.Position(call.Pos())
+		pos := d.fset.Position(call.Pos())
 		callType := types.CallType(sel.Sel.Name)
 		sdk := sdkName(version)
 
 		if spec.keyArgIndex == -1 {
-			usages = append(usages, types.FlagUsage{
+			d.usages = append(d.usages, types.FlagUsage{
 				FlagKey:          "*",
 				IsDynamic:        false,
-				File:             relPath,
+				File:             d.relPath,
 				Line:             pos.Line,
 				Column:           pos.Column,
 				CallType:         callType,
-				Fingerprint:      fingerprint.Generate("*", callType, relPath, nil),
+				Fingerprint:      fingerprint.Generate("*", callType, d.relPath, nil),
 				StalenessSignals: []types.StalenessSignal{},
 				Language:         "go",
 				SDK:              sdk,
@@ -143,19 +194,19 @@ func scanFile(fset *token.FileSet, file *ast.File, relPath string) []types.FlagU
 
 		var dynIdx *int
 		if isDynamic {
-			idx := dynamicIndex
-			dynamicIndex++
+			idx := d.dynamicIndex
+			d.dynamicIndex++
 			dynIdx = &idx
 		}
 
-		usages = append(usages, types.FlagUsage{
+		d.usages = append(d.usages, types.FlagUsage{
 			FlagKey:          flagKey,
 			IsDynamic:        isDynamic,
-			File:             relPath,
+			File:             d.relPath,
 			Line:             pos.Line,
 			Column:           pos.Column,
 			CallType:         callType,
-			Fingerprint:      fingerprint.Generate(flagKey, callType, relPath, dynIdx),
+			Fingerprint:      fingerprint.Generate(flagKey, callType, d.relPath, dynIdx),
 			StalenessSignals: []types.StalenessSignal{},
 			Language:         "go",
 			SDK:              sdk,
@@ -163,8 +214,6 @@ func scanFile(fset *token.FileSet, file *ast.File, relPath string) []types.FlagU
 		})
 		return true
 	})
-
-	return usages
 }
 
 // uniqueFlags mirrors flaglint-js's uniqueFlags semantics: dynamic and
