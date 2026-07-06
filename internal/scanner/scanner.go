@@ -223,10 +223,15 @@ func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFi
 		ctx := ctxs[pf.file]
 		pkg := pkgBindings(base, ctx.ownPkgKey)
 		for _, s := range fileScopes[pf.file] {
-			local := collectScopedBindings(s.body, mergeBindings(pkg, s.paramBindings), ctx)
-			for k, v := range collectCompositeLiteralFieldBindings(s.body, local, ctx) {
-				pkg[k] = v
-			}
+			walkScoped(s.body, mergeBindings(pkg, s.paramBindings), ctx, func(n ast.Node, current map[string]string) {
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return
+				}
+				for k, v := range compositeLiteralFieldBindings(lit, current, ctx) {
+					pkg[k] = v
+				}
+			})
 		}
 	}
 
@@ -239,7 +244,7 @@ func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFi
 		pkg := pkgBindings(base, ctx.ownPkgKey)
 		d := &fileDetector{fset: fset, relPath: pf.relPath}
 		for _, s := range fileScopes[pf.file] {
-			d.detect(s.body, collectScopedBindings(s.body, mergeBindings(pkg, s.paramBindings), ctx), s.declared, ctx.structFieldTypes)
+			d.detect(s.body, mergeBindings(pkg, s.paramBindings), s.declared, ctx.structFieldTypes, ctx)
 		}
 		allUsages = append(allUsages, d.usages...)
 	}
@@ -337,27 +342,34 @@ type fileDetector struct {
 // requires the method to be called directly through a selector expression
 // at the call site itself. This is the same class of indirection ADR 002
 // already defers to the opt-in --strict-types pass, not a new exception.
-func (d *fileDetector) detect(scope ast.Node, bindings, declared, structFieldTypes map[string]string) {
-	ast.Inspect(scope, func(n ast.Node) bool {
+//
+// bindings is the scope's initial bindings (whole-scan package bindings
+// merged with this scope's own parameter bindings) — walkScoped resolves
+// the block-scoped view in effect at each call site from there, so a
+// shadowed local variable is never mistaken for this scope's client. See
+// walkScoped's doc comment (identity.go) for why that requires more than
+// just scoping the map by block.
+func (d *fileDetector) detect(scope ast.Node, bindings, declared, structFieldTypes map[string]string, ctx fileContext) {
+	walkScoped(scope, bindings, ctx, func(n ast.Node, current map[string]string) {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
-			return true
+			return
 		}
 		sel, ok := unparen(call.Fun).(*ast.SelectorExpr)
 		if !ok {
-			return true
+			return
 		}
 		receiver := resolveReceiver(sel.X, declared, structFieldTypes)
 		if receiver == "" {
-			return true
+			return
 		}
-		version, bound := bindings[receiver]
+		version, bound := current[receiver]
 		if !bound {
-			return true
+			return
 		}
 		spec, known := methodSpecs[sel.Sel.Name]
 		if !known {
-			return true
+			return
 		}
 
 		pos := d.fset.Position(call.Pos())
@@ -378,7 +390,7 @@ func (d *fileDetector) detect(scope ast.Node, bindings, declared, structFieldTyp
 				SDK:              sdk,
 				Risk:             spec.risk,
 			})
-			return true
+			return
 		}
 
 		var keyArg ast.Expr
@@ -407,7 +419,6 @@ func (d *fileDetector) detect(scope ast.Node, bindings, declared, structFieldTyp
 			SDK:              sdk,
 			Risk:             riskFor(spec, isDynamic),
 		})
-		return true
 	})
 }
 

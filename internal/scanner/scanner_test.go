@@ -336,6 +336,23 @@ func TestScanFile_falsePositiveCrossFunctionShadowing(t *testing.T) {
 	}
 }
 
+func TestScanFile_falsePositiveBlockScopedShadowing(t *testing.T) {
+	usages := parseFixture(t, "false_positive_block_scoped_shadowing.go")
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want exactly 2 (before-loop-flag and after-loop-flag) — a re-`:=` of the same name inside a nested block must shadow the outer binding only within that block, not leak the shadow's absence back out: %+v", len(usages), usages)
+	}
+	got := map[string]bool{}
+	for _, u := range usages {
+		got[u.FlagKey] = true
+	}
+	if !got["before-loop-flag"] || !got["after-loop-flag"] {
+		t.Errorf("usages = %+v, want before-loop-flag and after-loop-flag, neither should-not-be-detected", usages)
+	}
+	if got["should-not-be-detected"] {
+		t.Errorf("usages = %+v, want should-not-be-detected absent — the nested block's unrelated \"client\" must shadow the outer real one", usages)
+	}
+}
+
 func TestScanFile_falsePositiveCrossTypeFieldCollision(t *testing.T) {
 	usages := parseFixture(t, "false_positive_cross_type_field_collision.go")
 	if len(usages) != 1 {
