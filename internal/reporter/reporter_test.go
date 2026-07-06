@@ -84,3 +84,60 @@ func TestRender_unsupportedFormat(t *testing.T) {
 		t.Fatal("Render() error = nil, want error for unsupported format")
 	}
 }
+
+func TestRender_json_emptyArraysAreNotNull(t *testing.T) {
+	out, err := Render(types.ScanResult{}, Options{Format: FormatJSON})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	// A raw string check, not just json.Unmarshal round-tripping: Go's
+	// decoder would happily turn a `null` array back into an empty slice,
+	// masking the exact bug this guards (nil slices marshaling as `null`
+	// instead of `[]`, which breaks a consumer's `.map()`/`jq` pipeline on
+	// the JSON *text* itself).
+	for _, field := range []string{`"uniqueFlags":null`, `"usages":null`, `"warnings":null`} {
+		if strings.Contains(out, field) {
+			t.Errorf("output contains %q — empty slices must marshal as [], not null, to match flaglint-js's array semantics:\n%s", field, out)
+		}
+	}
+}
+
+func TestCodeSpan_embeddedBacktick(t *testing.T) {
+	got := codeSpan("weird`key")
+	if !strings.Contains(got, "``") {
+		t.Errorf("codeSpan(%q) = %q, want a wider delimiter to correctly escape the embedded backtick", "weird`key", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("codeSpan(%q) = %q, want no newline", "weird`key", got)
+	}
+}
+
+func TestRender_markdown_flagKeyWithNewlineAndBacktickDoesNotBreakTable(t *testing.T) {
+	result := types.ScanResult{
+		Usages: []types.FlagUsage{
+			{FlagKey: "weird`key\ninjected | row", CallType: types.CallTypeBoolVariation, Risk: types.RiskLow, File: "flags.go", Line: 1},
+		},
+	}
+	out, err := Render(result, Options{Format: FormatMarkdown})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var tableRow string
+	for _, l := range lines {
+		if strings.Contains(l, "BoolVariation") {
+			tableRow = l
+			break
+		}
+	}
+	if tableRow == "" {
+		t.Fatalf("no table row found containing the flag, got:\n%s", out)
+	}
+	// The whole row must stay on one line (no embedded newline) and must
+	// have exactly the 4 expected columns (5 pipe characters), proving the
+	// embedded "|" was escaped rather than read as a new column separator.
+	if strings.Count(tableRow, "|") != 5 {
+		t.Errorf("table row has %d '|' characters, want 5 (4 columns) — embedded pipe/newline corrupted the row:\n%q", strings.Count(tableRow, "|"), tableRow)
+	}
+}

@@ -40,7 +40,7 @@ func formatMarkdown(result types.ScanResult, opts Options) string {
 		sorted := append([]types.FlagUsage(nil), staticUsages...)
 		sort.SliceStable(sorted, func(i, j int) bool { return riskRank(sorted[i].Risk) > riskRank(sorted[j].Risk) })
 		for _, u := range sorted {
-			fmt.Fprintf(&b, "| `%s` | %s | %s | %s:%d |\n", esc(u.FlagKey), u.CallType, u.Risk, esc(u.File), u.Line)
+			fmt.Fprintf(&b, "| %s | %s | %s | %s:%d |\n", codeSpan(u.FlagKey), u.CallType, u.Risk, esc(u.File), u.Line)
 		}
 		b.WriteString("\n")
 	}
@@ -93,7 +93,61 @@ func riskRank(r types.Risk) int {
 	}
 }
 
+// esc neutralizes characters that would corrupt a Markdown table cell or
+// list item: a literal newline (flag keys are attacker/user-controlled Go
+// string-literal content — via strconv.Unquote, a value can contain any
+// character an interpreted string literal can, including "\n") would split
+// the row/item across lines, and "|" would be read as a new table column.
 func esc(s string) string {
-	replacer := strings.NewReplacer("|", "\\|", "`", "\\`")
+	replacer := strings.NewReplacer(
+		"\r\n", " ",
+		"\n", " ",
+		"\r", " ",
+		"|", "\\|",
+	)
 	return replacer.Replace(s)
+}
+
+// codeSpan renders s as a CommonMark inline code span. Wrapping in a fixed
+// single backtick and backslash-escaping an embedded backtick (as esc used
+// to do) does not work: CommonMark code spans do not interpret backslash
+// escapes at all, so "\`" inside single backticks closes the span early
+// instead of producing a literal backtick, corrupting whatever table row or
+// list item it's embedded in. The correct approach (per the CommonMark
+// spec) is a delimiter longer than the longest run of consecutive
+// backticks in the content, padded with a space on each side if the
+// content starts or ends with a backtick.
+//
+// A literal "|" is replaced with a fullwidth lookalike ("｜"), not
+// backslash-escaped, for the same reason: escape sequences aren't
+// processed inside code spans, so "\|" would keep the literal "|" byte
+// present and still be split on by any table renderer that splits cells on
+// "|" without being code-span-aware (not every consumer of this Markdown
+// is a fully spec-compliant CommonMark/GFM parser). Newlines are
+// neutralized first for the same table/list-corruption reason as esc.
+func codeSpan(s string) string {
+	s = strings.NewReplacer(
+		"\r\n", " ",
+		"\n", " ",
+		"\r", " ",
+		"|", "｜",
+	).Replace(s)
+
+	longestRun, current := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			current++
+			if current > longestRun {
+				longestRun = current
+			}
+		} else {
+			current = 0
+		}
+	}
+
+	delim := strings.Repeat("`", longestRun+1)
+	if s == "" || strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		return delim + " " + s + " " + delim
+	}
+	return delim + s + delim
 }

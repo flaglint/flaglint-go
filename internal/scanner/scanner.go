@@ -36,10 +36,13 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 	}
 	sort.Strings(relFiles) // deterministic output order, independent of filesystem walk order
 
-	var (
-		allUsages []types.FlagUsage
-		warnings  []types.ScanWarning
-	)
+	// Initialized to empty (not nil) slices: encoding/json marshals a nil
+	// slice as `null`, but flaglint-js's array operations never produce
+	// null — a clean scan must report `"usages": []`, not `"usages": null`,
+	// to match the cross-tool JSON contract (ADR 003) and not break a
+	// consumer doing `result.usages.map(...)` or `jq '.usages[]'`.
+	allUsages := []types.FlagUsage{}
+	warnings := []types.ScanWarning{}
 
 	for _, rel := range relFiles {
 		full := filepath.Join(absRoot, rel)
@@ -236,7 +239,7 @@ func (d *fileDetector) detect(scope ast.Node, bindings map[string]string, declar
 // output.
 func uniqueFlags(usages []types.FlagUsage) []string {
 	seen := map[string]bool{}
-	var keys []string
+	keys := []string{} // never nil — see the allUsages/warnings comment in Scan above
 	for _, u := range usages {
 		if u.IsDynamic || u.FlagKey == "*" {
 			continue

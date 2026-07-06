@@ -166,6 +166,52 @@ func Run() {
 	}
 }
 
+func TestCLI_customConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, filepath.Join(dir, "flags.go"), sampleService)
+	configPath := filepath.Join(dir, "custom-config.json")
+	writeGoFile(t, configPath, `{"reportTitle": "Custom Title From Config"}`)
+
+	out, err := exec.Command(binPath, "scan", dir, "--config", configPath).Output()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+	if !strings.Contains(string(out), "Custom Title From Config") {
+		t.Errorf("output missing custom reportTitle from --config, got:\n%s", out)
+	}
+}
+
+func TestCLI_malformedConfigExits2(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, filepath.Join(dir, "flags.go"), sampleService)
+	configPath := filepath.Join(dir, "bad-config.json")
+	writeGoFile(t, configPath, `{not valid json`)
+
+	cmd := exec.Command(binPath, "scan", dir, "--config", configPath)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %v", err)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2", exitErr.ExitCode())
+	}
+}
+
+func TestCLI_emptyScanProducesEmptyArraysNotNull(t *testing.T) {
+	dir := t.TempDir() // no .go files at all
+
+	out, err := exec.Command(binPath, "scan", dir, "--format", "json").Output()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+	for _, field := range []string{`"uniqueFlags":null`, `"usages":null`, `"warnings":null`} {
+		if strings.Contains(string(out), field) {
+			t.Errorf("output contains %q — empty results must serialize as [], not null:\n%s", field, out)
+		}
+	}
+}
+
 func TestCLI_version(t *testing.T) {
 	out, err := exec.Command(binPath, "--version").Output()
 	if err != nil {
