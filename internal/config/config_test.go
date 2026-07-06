@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -112,6 +113,14 @@ func TestLoad_topLevelNullRejected(t *testing.T) {
 }
 
 func TestLoad_unreadableCandidateSkipsToNext(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Chmod on Windows only toggles the read-only attribute, not a
+		// POSIX-style permission bitmask — 0o000 does not actually make
+		// the file unreadable by the current user there, so this test's
+		// premise doesn't hold. Verified by this suite's own Windows CI
+		// run, not assumed.
+		t.Skip("chmod-based unreadable-file simulation is POSIX-only")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root — file permissions are not enforced")
 	}

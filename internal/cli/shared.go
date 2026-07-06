@@ -55,14 +55,30 @@ func loadConfig(configPath string) (config.Config, *ExitError) {
 // contract rather than the bug.
 func writeReport(cmd *cobra.Command, report, outputPath string) error {
 	if outputPath == "" {
-		fmt.Fprintln(cmd.OutOrStdout(), report)
+		// The report is the command's actual output, not a discardable
+		// progress line — unlike stderrInfo below, a real write failure
+		// here (stdout closed, broken pipe) is worth surfacing rather than
+		// silently swallowing, even though there's little a CLI can
+		// usefully do about a broken stdout beyond reporting it.
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), report); err != nil {
+			return internalError("failed to write report to stdout: %v", err)
+		}
 		return nil
 	}
 	if err := os.WriteFile(outputPath, []byte(report+"\n"), 0o644); err != nil {
 		return internalError("failed to write report to %s: %v", outputPath, err)
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Report written to %s\n", outputPath)
+	stderrInfo(cmd, "Report written to %s\n", outputPath)
 	return nil
+}
+
+// stderrInfo writes a formatted progress/summary line to cmd's stderr,
+// mirroring flaglint-js's own stderrInfo helper (src/commands/shared.ts).
+// The write error is deliberately discarded: a progress line failing to
+// reach a closed or broken stderr isn't something any command can
+// meaningfully react to, unlike writeReport's actual output above.
+func stderrInfo(cmd *cobra.Command, format string, args ...any) {
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), format, args...)
 }
 
 // formatDuration renders a millisecond duration as a short human string

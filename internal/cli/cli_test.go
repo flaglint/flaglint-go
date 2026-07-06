@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -18,16 +19,29 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dir)
+	// NOT a `defer os.RemoveAll(dir)` — os.Exit below bypasses every
+	// deferred function in this goroutine, so a deferred cleanup here
+	// would silently never run on any test invocation. Clean up
+	// explicitly before exiting instead.
 
-	binPath = filepath.Join(dir, "flaglint-go")
+	binName := "flaglint-go"
+	if runtime.GOOS == "windows" {
+		// go build appends .exe to the output file on Windows regardless
+		// of the -o path given — the binary on disk is actually named
+		// "flaglint-go.exe" there, so binPath must match or every
+		// exec.Command call below fails with "executable file not found".
+		binName += ".exe"
+	}
+	binPath = filepath.Join(dir, binName)
 	build := exec.Command("go", "build", "-o", binPath, "./../../cmd/flaglint-go")
 	build.Dir = mustGetwd()
 	if out, err := build.CombinedOutput(); err != nil {
 		panic("build failed: " + err.Error() + "\n" + string(out))
 	}
 
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 func mustGetwd() string {

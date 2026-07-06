@@ -49,7 +49,7 @@ func newValidateCommand() *cobra.Command {
 				return internalError("scan failed: %v", err)
 			}
 			for _, w := range result.Warnings {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s\n", w.Kind, w.File)
+				stderrInfo(cmd, "warning: %s: %s\n", w.Kind, w.File)
 			}
 
 			vOpts := validator.Options{NoDirectLaunchDarkly: noDirectLD, BootstrapExclude: bootstrapExclude}
@@ -117,19 +117,19 @@ func checkBaseline(cmd *cobra.Command, result types.ScanResult, baselinePath str
 
 	if !failOnNew {
 		if len(newFindings) > 0 {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %d finding(s) not in baseline (use --fail-on-new to fail CI)\n", len(newFindings))
+			stderrInfo(cmd, "warning: %d finding(s) not in baseline (use --fail-on-new to fail CI)\n", len(newFindings))
 		}
 		return nil
 	}
 
 	if len(newFindings) == 0 {
-		fmt.Fprintln(cmd.ErrOrStderr(), "✓ No new findings beyond baseline")
+		stderrInfo(cmd, "✓ No new findings beyond baseline\n")
 		return nil
 	}
 
-	fmt.Fprintf(cmd.ErrOrStderr(), "Error: %d new finding(s) not in baseline:\n", len(newFindings))
+	stderrInfo(cmd, "Error: %d new finding(s) not in baseline:\n", len(newFindings))
 	for _, fp := range newFindings {
-		fmt.Fprintf(cmd.ErrOrStderr(), "  - %s\n", fp)
+		stderrInfo(cmd, "  - %s\n", fp)
 	}
 	return &ExitError{Code: ExitPolicyFailure, Message: fmt.Sprintf("%d new finding(s) not in baseline", len(newFindings))}
 }
