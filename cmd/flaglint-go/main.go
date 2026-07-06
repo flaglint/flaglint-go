@@ -5,18 +5,14 @@
 package main
 
 import (
-	"fmt"
 	"os"
+
+	"github.com/flaglint/flaglint-go/internal/cli"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Println(version)
-		return
-	}
-	fmt.Fprintln(os.Stderr, "flaglint-go: no commands implemented yet")
-	os.Exit(3)
+	os.Exit(cli.Execute(version))
 }
