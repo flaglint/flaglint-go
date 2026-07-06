@@ -81,6 +81,59 @@ func TestLoad_malformedJSON(t *testing.T) {
 	}
 }
 
+func TestLoad_explicitNullFieldRejected(t *testing.T) {
+	dir := withTempDir(t)
+	writeFile(t, filepath.Join(dir, ".flaglintrc"), `{"include": null}`)
+
+	_, err := Load("")
+	if err == nil {
+		t.Fatal("Load() error = nil, want error for explicit null on a slice field (must not silently drop the default)")
+	}
+}
+
+func TestLoad_explicitNullScalarRejected(t *testing.T) {
+	dir := withTempDir(t)
+	writeFile(t, filepath.Join(dir, ".flaglintrc"), `{"provider": null}`)
+
+	_, err := Load("")
+	if err == nil {
+		t.Fatal("Load() error = nil, want error for explicit null on a scalar field")
+	}
+}
+
+func TestLoad_topLevelNullRejected(t *testing.T) {
+	dir := withTempDir(t)
+	writeFile(t, filepath.Join(dir, ".flaglintrc"), `null`)
+
+	_, err := Load("")
+	if err == nil {
+		t.Fatal("Load() error = nil, want error for a config file that is just `null`")
+	}
+}
+
+func TestLoad_unreadableCandidateSkipsToNext(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root — file permissions are not enforced")
+	}
+	dir := withTempDir(t)
+	unreadable := filepath.Join(dir, ".flaglintrc")
+	writeFile(t, unreadable, `{"provider": "launchdarkly"}`)
+	if err := os.Chmod(unreadable, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o644) })
+
+	writeFile(t, filepath.Join(dir, ".flaglintrc.json"), `{"outputDir": "from-second-candidate"}`)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error = %v, want it to skip the unreadable candidate and use the next one", err)
+	}
+	if cfg.OutputDir != "from-second-candidate" {
+		t.Errorf("Load().OutputDir = %q, want from-second-candidate", cfg.OutputDir)
+	}
+}
+
 func TestLoad_unsupportedProvider(t *testing.T) {
 	dir := withTempDir(t)
 	writeFile(t, filepath.Join(dir, ".flaglintrc"), `{"provider": "unleash"}`)
