@@ -228,7 +228,7 @@ func (d *fileDetector) detect(scope ast.Node, bindings map[string]string, declar
 			StalenessSignals: []types.StalenessSignal{},
 			Language:         "go",
 			SDK:              sdk,
-			Risk:             spec.risk,
+			Risk:             riskFor(spec, isDynamic),
 		})
 		return true
 	})

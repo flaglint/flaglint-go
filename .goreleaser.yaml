@@ -1,0 +1,66 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: flaglint-go
+    main: ./cmd/flaglint-go
+    binary: flaglint-go
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  disable: true # CHANGELOG.md is hand-maintained, matching flaglint-js's convention
+
+release:
+  github:
+    owner: flaglint
+    name: flaglint-go
+
+# Deprecated in goreleaser v2.10 in favor of homebrew_casks, but kept here
+# to match the existing flaglint-js formula's Formula/ convention in the
+# same tap (flaglint/homebrew-tap) rather than mixing Formula and Cask
+# layouts for two related products. Revisit if brews is ever removed
+# outright, not just deprecated.
+brews:
+  - name: flaglint-go
+    repository:
+      owner: flaglint
+      name: homebrew-tap
+      branch: main
+      # The default GITHUB_TOKEN is scoped to this repo only — pushing a
+      # commit to a *different* repo (flaglint/homebrew-tap) needs a PAT
+      # with contents:write there, stored as this repo's
+      # HOMEBREW_TAP_GITHUB_TOKEN secret. See release.yml.
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/flaglint/flaglint-go"
+    description: "Native Go binary for auditing LaunchDarkly Go SDK usage — no Node.js required"
+    license: "MIT"
+    install: |
+      bin.install "flaglint-go"
+    test: |
+      system "#{bin}/flaglint-go", "--version"

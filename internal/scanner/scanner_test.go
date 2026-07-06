@@ -86,17 +86,20 @@ func TestScanFile_positiveVariety(t *testing.T) {
 		t.Fatalf("got %d usages, want 5: %+v", len(usages), usages)
 	}
 
-	// 1: dynamic identifier argument
-	if got := usages[0]; !got.IsDynamic || got.FlagKey != "dynamic" {
-		t.Errorf("usages[0] = %+v, want dynamic placeholder", got)
+	// 1: dynamic identifier argument — high risk regardless of the
+	// underlying method's own risk (BoolVariation is otherwise low risk;
+	// ADR 002's dynamic-key rule overrides that, since an unresolvable key
+	// "cannot resolve statically" no matter how simple the method is).
+	if got := usages[0]; !got.IsDynamic || got.FlagKey != "dynamic" || got.Risk != types.RiskHigh {
+		t.Errorf("usages[0] = %+v, want dynamic placeholder at high risk", got)
 	}
 	if want := "launchdarkly:BoolVariation:dynamic:positive_variety.go:0"; usages[0].Fingerprint != want {
 		t.Errorf("usages[0].Fingerprint = %q, want %q", usages[0].Fingerprint, want)
 	}
 
 	// 2: dynamic fmt.Sprintf argument — second dynamic index in this file
-	if got := usages[1]; !got.IsDynamic || got.FlagKey != "dynamic" {
-		t.Errorf("usages[1] = %+v, want dynamic placeholder", got)
+	if got := usages[1]; !got.IsDynamic || got.FlagKey != "dynamic" || got.Risk != types.RiskHigh {
+		t.Errorf("usages[1] = %+v, want dynamic placeholder at high risk", got)
 	}
 	if want := "launchdarkly:StringVariation:dynamic:positive_variety.go:1"; usages[1].Fingerprint != want {
 		t.Errorf("usages[1].Fingerprint = %q, want %q", usages[1].Fingerprint, want)
