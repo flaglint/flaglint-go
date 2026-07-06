@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -20,7 +21,15 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(dir)
 
-	binPath = filepath.Join(dir, "flaglint-go")
+	binName := "flaglint-go"
+	if runtime.GOOS == "windows" {
+		// go build appends .exe to the output file on Windows regardless
+		// of the -o path given — the binary on disk is actually named
+		// "flaglint-go.exe" there, so binPath must match or every
+		// exec.Command call below fails with "executable file not found".
+		binName += ".exe"
+	}
+	binPath = filepath.Join(dir, binName)
 	build := exec.Command("go", "build", "-o", binPath, "./../../cmd/flaglint-go")
 	build.Dir = mustGetwd()
 	if out, err := build.CombinedOutput(); err != nil {

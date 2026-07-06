@@ -79,6 +79,11 @@ jobs:
           go-version: "1.23"
           cache: true
 
+      # Pinned to a v2.x release explicitly: "latest" resolves to the
+      # newest v1.x release for backward compat, which rejects this repo's
+      # v2 config schema ("linters.default", top-level "formatters") with a
+      # jsonschema validation error — found by this workflow's own first
+      # real run, not assumed.
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v2.12.2
