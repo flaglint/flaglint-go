@@ -56,12 +56,25 @@ func traceSDKImports(file *ast.File) sdkImports {
 	return res
 }
 
+// unparen strips any number of enclosing parentheses, so `(ld.MakeClient)(...)`
+// and `((client.BoolVariation))(...)` resolve the same as their unparenthesized
+// forms.
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
 // isSDKConstructorCall reports whether call is `<alias>.MakeClient(...)` or
 // `<alias>.MakeCustomClient(...)` for a traced SDK alias, or a bare
 // `MakeClient(...)`/`MakeCustomClient(...)` when the SDK was dot-imported.
 // Returns the SDK version the call resolves to.
 func isSDKConstructorCall(call *ast.CallExpr, imports sdkImports) (version string, ok bool) {
-	switch fn := call.Fun.(type) {
+	switch fn := unparen(call.Fun).(type) {
 	case *ast.SelectorExpr:
 		pkgIdent, ok := fn.X.(*ast.Ident)
 		if !ok {
@@ -111,36 +124,135 @@ func collectPackageLevelBindings(file *ast.File, imports sdkImports) map[string]
 }
 
 // collectFieldBindings finds every struct-field client binding (e.g.
-// "s.Client, _ = ld.MakeClient(...)") anywhere in the file. Unlike local
-// variables, a struct field is not function-scoped in real Go semantics —
-// it represents object state that is legitimately set in one method and
-// used from a completely different one (a constructor/setup method and the
-// methods that use the client it configured). So field bindings are
-// collected file-wide, in contrast to local identifier bindings, which are
-// scoped per function by collectScopedBindings below.
+// "s.Client, _ = ld.MakeClient(...)") in the file. Unlike local variables, a
+// struct field is not function-scoped in real Go semantics — it represents
+// object state that is legitimately set in one method and used from a
+// completely different one (a constructor/setup method and the methods
+// that use the client it configured). So field bindings are collected
+// file-wide, in contrast to local identifier bindings, which are scoped
+// per function by collectScopedBindings below.
+//
+// Bindings are keyed by the field's *declared type name* ("RealService.Client"),
+// resolved syntactically from the enclosing function's receiver/parameter
+// declarations — never by the receiver variable's name alone ("s.Client").
+// Two unrelated struct types that happen to share both a receiver/parameter
+// name and a field name (e.g. two different "Client" fields, each on a
+// different struct, both accessed through a variable named "s" in
+// different functions) would otherwise collide in a flat variable-keyed
+// map — exactly the same false-positive class collectScopedBindings' per-
+// function scoping fixes for local variables, reintroduced for fields
+// because they're deliberately not function-scoped.
+//
+// When a receiver's type cannot be resolved this way (e.g. a local
+// variable without an explicit declared type), the assignment is not
+// bound at all. Phase 1 prefers a missed detection over a possible false
+// positive here — this matches the project's safety-first philosophy
+// (ADR 002): local variable struct construction with an inferred type is
+// deferred to the opt-in --strict-types pass, which has real type
+// information and does not need this restriction.
 func collectFieldBindings(file *ast.File, imports sdkImports) map[string]string {
 	bindings := map[string]string{}
-	ast.Inspect(file, func(n ast.Node) bool {
-		assign, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
 		}
-		for i, rhs := range assign.Rhs {
-			call, ok := rhs.(*ast.CallExpr)
+		declared := declaredParamTypes(fn)
+
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
 			if !ok {
-				continue
+				return true
 			}
-			version, ok := isSDKConstructorCall(call, imports)
-			if !ok || i >= len(assign.Lhs) {
-				continue
+			for i, rhs := range assign.Rhs {
+				call, ok := rhs.(*ast.CallExpr)
+				if !ok {
+					continue
+				}
+				version, ok := isSDKConstructorCall(call, imports)
+				if !ok || i >= len(assign.Lhs) {
+					continue
+				}
+				sel, ok := assign.Lhs[i].(*ast.SelectorExpr)
+				if !ok {
+					continue
+				}
+				if key := qualifiedFieldKey(sel, declared); key != "" {
+					bindings[key] = version
+				}
 			}
-			if sel, ok := assign.Lhs[i].(*ast.SelectorExpr); ok {
-				bindings[exprString(sel)] = version
-			}
-		}
-		return true
-	})
+			return true
+		})
+	}
 	return bindings
+}
+
+// declaredParamTypes maps each receiver/parameter identifier of fn to its
+// declared type's simple name ("RealService", not "*pkg.RealService"),
+// resolved purely from the AST — no build or type-checking required.
+// Parameters whose type isn't a plain name or pointer-to-name (interfaces,
+// generics, unnamed struct types, ...) are left unresolved.
+func declaredParamTypes(fn *ast.FuncDecl) map[string]string {
+	types := paramTypesFromFieldList(fn.Type.Params)
+	for k, v := range paramTypesFromFieldList(fn.Recv) {
+		types[k] = v
+	}
+	return types
+}
+
+// paramTypesFromFuncLit is declaredParamTypes' equivalent for a function
+// literal, which has parameters but never a receiver.
+func paramTypesFromFuncLit(lit *ast.FuncLit) map[string]string {
+	return paramTypesFromFieldList(lit.Type.Params)
+}
+
+func paramTypesFromFieldList(fl *ast.FieldList) map[string]string {
+	types := map[string]string{}
+	if fl == nil {
+		return types
+	}
+	for _, f := range fl.List {
+		name := simpleTypeName(f.Type)
+		if name == "" {
+			continue
+		}
+		for _, n := range f.Names {
+			types[n.Name] = name
+		}
+	}
+	return types
+}
+
+// simpleTypeName returns the bare type name for an identifier, a pointer to
+// one, or a package-qualified name (the package qualifier is dropped since
+// Phase 1 does not resolve cross-package types) — "" for anything else.
+func simpleTypeName(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		return simpleTypeName(t.X)
+	case *ast.SelectorExpr:
+		return t.Sel.Name
+	default:
+		return ""
+	}
+}
+
+// qualifiedFieldKey resolves a single-level field selector ("s.Client") to
+// "TypeName.Field" using declared, or "" if the receiver's type isn't known
+// (see collectFieldBindings for why that means "don't bind"). Multi-level
+// selectors (s.Nested.Client) are out of Phase 1 scope and return "".
+func qualifiedFieldKey(sel *ast.SelectorExpr, declared map[string]string) string {
+	recv, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	typeName, ok := declared[recv.Name]
+	if !ok {
+		return ""
+	}
+	return typeName + "." + sel.Sel.Name
 }
 
 // collectScopedBindings returns a copy of base extended with every *local
@@ -157,6 +269,17 @@ func collectFieldBindings(file *ast.File, imports sdkImports) map[string]string 
 //
 // Indirection through a factory function or interface satisfaction is a
 // known Phase 1 gap, deferred to the opt-in --strict-types pass (ADR 002).
+//
+// Known Phase 1 limitation: this map is flat across the whole function, not
+// block-scoped. A deliberate re-`:=` of the same name inside a nested block
+// (e.g. a for-loop shadowing an outer real client variable with an
+// unrelated value) is not modeled — the outer binding remains visible to
+// the inner block. This is a narrower risk than the cross-function case
+// this function was introduced to fix: it requires the same identifier to
+// be deliberately reused for something unrelated within one function, a
+// pattern most Go style guides (and `go vet -shadow`) already discourage.
+// Full block scoping is deferred rather than risk destabilizing this fix
+// under time pressure; tracked for a future pass if it proves necessary.
 func collectScopedBindings(scope ast.Node, base map[string]string, imports sdkImports) map[string]string {
 	bindings := make(map[string]string, len(base))
 	for k, v := range base {
@@ -222,19 +345,21 @@ func bindFromValueSpec(vs *ast.ValueSpec, imports sdkImports, bindings map[strin
 	}
 }
 
-// exprString renders a simple identifier or selector chain (e.g. "s.Client")
-// as a string key. Returns "" for expressions it doesn't recognize (index
-// expressions, calls, etc.) — those are never treated as client bindings.
-func exprString(e ast.Expr) string {
-	switch v := e.(type) {
+// resolveReceiver returns the bindings-map key for a method call's receiver
+// expression: a plain identifier resolves to its own name (local variable
+// or package-level var lookup, unaffected by field type-qualification); a
+// single-level field selector ("s.Client") resolves through declared to
+// "TypeName.Client" — matching how collectFieldBindings keys struct-field
+// bindings. It deliberately never falls back to the raw "s.Client" text,
+// which would reintroduce the cross-type collision collectFieldBindings's
+// type-qualification exists to prevent. Anything else (index expressions,
+// calls, multi-level selectors) returns "".
+func resolveReceiver(recv ast.Expr, declared map[string]string) string {
+	switch e := recv.(type) {
 	case *ast.Ident:
-		return v.Name
+		return e.Name
 	case *ast.SelectorExpr:
-		base := exprString(v.X)
-		if base == "" {
-			return ""
-		}
-		return base + "." + v.Sel.Name
+		return qualifiedFieldKey(e, declared)
 	default:
 		return ""
 	}

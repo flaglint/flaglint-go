@@ -85,6 +85,12 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 // must never be mistaken for this scope's client. dynamicIndex is still a
 // single counter for the whole file, matching flaglint-js's per-file
 // (not per-function) numbering.
+//
+// Known Phase 1 gap: a method value taken from a bound client
+// (`f := client.BoolVariation; f(...)`) is not detected — detection
+// requires the method to be called directly through a selector expression
+// at the call site itself. This is the same class of indirection ADR 002
+// already defers to the opt-in --strict-types pass, not a new exception.
 func scanFile(fset *token.FileSet, file *ast.File, relPath string) []types.FlagUsage {
 	imports := traceSDKImports(file)
 	if !imports.present() {
@@ -108,7 +114,7 @@ func scanFile(fset *token.FileSet, file *ast.File, relPath string) []types.FlagU
 			if n.Body == nil {
 				continue // external/assembly function, no body to scan
 			}
-			d.detect(n.Body, collectScopedBindings(n.Body, base, imports))
+			d.detect(n.Body, collectScopedBindings(n.Body, base, imports), declaredParamTypes(n))
 		case *ast.GenDecl:
 			if n.Tok != token.VAR {
 				continue
@@ -119,11 +125,20 @@ func scanFile(fset *token.FileSet, file *ast.File, relPath string) []types.FlagU
 					continue
 				}
 				for _, val := range vs.Values {
-					lit, ok := val.(*ast.FuncLit)
-					if !ok {
-						continue
-					}
-					d.detect(lit.Body, collectScopedBindings(lit.Body, base, imports))
+					// Not just a direct `var x = func(){...}` — also catches
+					// an immediately-invoked func literal (`var x =
+					// func(){...}()`) or one passed as an argument, by
+					// finding every FuncLit nested anywhere in the
+					// initializer expression rather than requiring it to
+					// be the initializer itself.
+					ast.Inspect(val, func(inner ast.Node) bool {
+						lit, ok := inner.(*ast.FuncLit)
+						if !ok {
+							return true
+						}
+						d.detect(lit.Body, collectScopedBindings(lit.Body, base, imports), paramTypesFromFuncLit(lit))
+						return true
+					})
 				}
 			}
 		}
@@ -142,17 +157,17 @@ type fileDetector struct {
 	usages       []types.FlagUsage
 }
 
-func (d *fileDetector) detect(scope ast.Node, bindings map[string]string) {
+func (d *fileDetector) detect(scope ast.Node, bindings map[string]string, declared map[string]string) {
 	ast.Inspect(scope, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
+		sel, ok := unparen(call.Fun).(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
-		receiver := exprString(sel.X)
+		receiver := resolveReceiver(sel.X, declared)
 		if receiver == "" {
 			return true
 		}
