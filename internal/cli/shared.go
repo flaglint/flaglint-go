@@ -13,6 +13,15 @@ import (
 // *ExitError (exit 2) with a clear message otherwise. Centralized here from
 // the start — flaglint-js had to retrofit this after the same check was
 // copy-pasted across four commands.
+//
+// Deliberate deviation from flaglint-js's current shipped behavior: its
+// validateDirectory (src/commands/shared.ts) actually calls process.exit(1)
+// for both "not found" and "not a directory" — verified directly against
+// the built binary, not just the source. That contradicts the documented
+// exit-code contract (ADR 010) and reopens an exit-1 path for scan/audit,
+// which are supposed to never produce it. Filed as
+// github.com/flaglint/flaglint-js#209 rather than replicated here — this
+// implements the documented contract (exit 2), not the current bug.
 func validateDirectory(dir string) *ExitError {
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -38,8 +47,12 @@ func loadConfig(configPath string) (config.Config, *ExitError) {
 }
 
 // writeReport writes report to outputPath if non-empty, otherwise to the
-// command's stdout. A file-write failure is an internal error (exit 3),
-// matching flaglint-js's behavior for --output failures.
+// command's stdout. A file-write failure is an internal error (exit 3) —
+// NOT matching flaglint-js's current shipped behavior, which calls
+// process.exit(1) here (verified against source; same root-cause pattern
+// as validateDirectory above, reported alongside it in
+// github.com/flaglint/flaglint-js#209). This implements the documented
+// contract rather than the bug.
 func writeReport(cmd *cobra.Command, report, outputPath string) error {
 	if outputPath == "" {
 		fmt.Fprintln(cmd.OutOrStdout(), report)
