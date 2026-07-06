@@ -1,5 +1,9 @@
 # flaglint-go
 
+[![CI](https://github.com/flaglint/flaglint-go/actions/workflows/ci.yml/badge.svg)](https://github.com/flaglint/flaglint-go/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/flaglint/flaglint-go)](https://github.com/flaglint/flaglint-go/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Native Go binary for auditing [LaunchDarkly Go server SDK](https://github.com/launchdarkly/go-server-sdk)
 usage — no Node.js required.
 
@@ -48,9 +52,7 @@ go install github.com/flaglint/flaglint-go/cmd/flaglint-go@latest
 
 Prebuilt release binaries and a Homebrew formula (`flaglint/tap/flaglint-go`)
 publish automatically once a version tag is cut — see
-[.goreleaser.yaml](.goreleaser.yaml). Homebrew publishing was disabled for
-the `v0.1.0` release (its cross-repo token wasn't configured yet) and takes
-effect starting with the next tagged release.
+[.goreleaser.yaml](.goreleaser.yaml).
 
 ```bash
 brew install flaglint/tap/flaglint-go
