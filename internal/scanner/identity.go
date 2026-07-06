@@ -19,10 +19,6 @@ type sdkImports struct {
 	dotImported map[string]bool   // "v6"/"v7" -> true, if dot-imported in this file
 }
 
-func (s sdkImports) present() bool {
-	return len(s.aliases) > 0 || len(s.dotImported) > 0
-}
-
 // traceSDKImports walks file's import declarations for the LaunchDarkly Go
 // SDK (v6 or v7) and records whatever local alias is in play — this is the
 // only source of truth for client identity; see ADR 002.
