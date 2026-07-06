@@ -33,8 +33,14 @@ const (
 	RiskHigh   Risk = "high"
 )
 
-// StalenessSignal mirrors flaglint-js's shape for schema parity. Go audit
-// does not populate this in Phase 1 — see docs/adr/003-cross-tool-contract.md.
+// StalenessSignal is a placeholder for future staleness-detection parity
+// with flaglint-js, which uses a discriminated union with variant-specific
+// payloads ({source: "keyword"; keyword} | {source: "path"; pattern} |
+// {source: "minFileCount"; fileCount; threshold}). Go audit does not
+// implement staleness heuristics in Phase 1 and never populates this field —
+// see docs/adr/003-cross-tool-contract.md. The shape below is intentionally
+// minimal rather than a premature copy of the TS union; it will be revisited
+// (likely as a proper sum type) if and when Phase 2 implements staleness.
 type StalenessSignal struct {
 	Source string `json:"source"`
 }
@@ -62,8 +68,9 @@ func IsStale(u FlagUsage) bool {
 
 // ScanWarning records a non-fatal problem encountered while scanning.
 type ScanWarning struct {
-	Kind string `json:"kind"` // "read-failure" | "parse-failure"
-	File string `json:"file"`
+	Kind   string `json:"kind"` // "read-failure" | "parse-failure"
+	File   string `json:"file"`
+	FsCode string `json:"fsCode,omitempty"` // e.g. "ENOENT", "EACCES" — only set for "read-failure"
 }
 
 // ScanResult is the top-level output of a scan, shared by audit/scan/validate.

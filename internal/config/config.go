@@ -7,6 +7,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -48,12 +49,16 @@ func Load(configPath string) (Config, error) {
 		if err != nil {
 			continue
 		}
+		// Mirrors loadConfig()'s bare `catch { continue }` in config.ts: any
+		// read failure (not just "not found" — permission denied, EISDIR,
+		// etc.) skips this candidate and tries the next one.
 		raw, err := os.ReadFile(full)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return Config{}, fmt.Errorf("error reading %s: %w", candidate, err)
+			continue
+		}
+
+		if err := rejectExplicitNulls(raw, candidate); err != nil {
+			return Config{}, err
 		}
 
 		cfg := defaultConfig()
@@ -68,6 +73,31 @@ func Load(configPath string) (Config, error) {
 	}
 
 	return defaultConfig(), nil
+}
+
+// rejectExplicitNulls errors on any top-level field whose JSON value is the
+// literal `null`. This matches Zod's behavior in the TS reference: `.default()`
+// only fires when a key is *absent* — a key explicitly set to `null` still
+// fails schema validation there. Without this check, Go's json.Unmarshal
+// would silently reset slice-typed fields (include/exclude) to nil on
+// explicit null while leaving scalar fields untouched, an asymmetry that
+// has no equivalent in the TS reference and would otherwise pass silently.
+func rejectExplicitNulls(raw []byte, candidate string) error {
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return fmt.Errorf("error in %s: config must be a JSON object, not null", candidate)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fmt.Errorf("error in %s: %w", candidate, err)
+	}
+	for key, val := range fields {
+		if bytes.Equal(bytes.TrimSpace(val), []byte("null")) {
+			return fmt.Errorf("error in %s: field %q must not be null", candidate, key)
+		}
+	}
+	return nil
 }
 
 func assertSupportedProvider(provider, configPath string) error {
