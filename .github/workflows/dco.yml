@@ -1,0 +1,28 @@
+name: DCO
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check_dco:
+    name: Check DCO
+    # Bots (dependabot, github-actions) cannot sign commits — skip for them.
+    if: |
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run dco-check
+        uses: christophebedard/dco-check@0.5.1
+        with:
+          python-version: '3.12'
+          args: '--verbose'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
