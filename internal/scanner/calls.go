@@ -44,6 +44,20 @@ var methodSpecs = map[string]methodSpec{
 	"AllFlagsState": {types.RiskHigh, -1},
 }
 
+// riskFor combines a method's static risk classification with the dynamic-
+// key rule from ADR 002's risk table: a dynamic flag key is high risk
+// regardless of which method it's on, since it "cannot resolve statically"
+// no matter how simple the underlying method otherwise is. Without this,
+// e.g. a dynamic-key BoolVariation call would be scored low risk purely
+// from its method table entry, silently inflating an audit's readiness
+// score with exactly the calls that most need manual review.
+func riskFor(spec methodSpec, isDynamic bool) types.Risk {
+	if isDynamic {
+		return types.RiskHigh
+	}
+	return spec.risk
+}
+
 func sdkName(version string) string {
 	return "go-server-sdk-" + version
 }
