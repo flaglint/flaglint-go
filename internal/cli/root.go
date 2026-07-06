@@ -61,7 +61,8 @@ func newRootCommand(version string) *cobra.Command {
 		Short:   "Audit LaunchDarkly Go SDK usage — a native Go counterpart to flaglint-js",
 		Version: version,
 	}
-	root.AddCommand(newAuditCommand())
+	root.AddCommand(newAuditCommand(version))
 	root.AddCommand(newScanCommand())
+	root.AddCommand(newValidateCommand())
 	return root
 }

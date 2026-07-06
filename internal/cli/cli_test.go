@@ -239,3 +239,128 @@ func TestCLI_writeOutputToFile(t *testing.T) {
 		t.Errorf("output file missing flag, got:\n%s", content)
 	}
 }
+
+func TestCLI_validate_reportOnlyByDefault(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, filepath.Join(dir, "flags.go"), sampleService)
+
+	cmd := exec.Command(binPath, "validate", dir)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("validate without --no-direct-launchdarkly must never fail, got: %v", err)
+	}
+}
+
+func TestCLI_validate_noDirectLaunchDarklyFailsWithFindings(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, filepath.Join(dir, "flags.go"), sampleService)
+
+	cmd := exec.Command(binPath, "validate", dir, "--no-direct-launchdarkly")
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %v", err)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1 (policy failure)", exitErr.ExitCode())
+	}
+}
+
+func TestCLI_validate_bootstrapExcludeAllowsFile(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, filepath.Join(dir, "provider", "bootstrap.go"), sampleService)
+
+	cmd := exec.Command(binPath, "validate", dir, "--no-direct-launchdarkly", "--bootstrap-exclude", "provider/**")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("validate with matching --bootstrap-exclude must pass, got: %v", err)
+	}
+}
+
+func TestCLI_validate_sarifFormat(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, filepath.Join(dir, "flags.go"), sampleService)
+
+	out, err := exec.Command(binPath, "validate", dir, "--no-direct-launchdarkly", "--format", "sarif").Output()
+	// Exit code 1 is expected here (violations exist) — .Output() returns an
+	// error in that case, but stdout is still captured and must be valid SARIF.
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if !strings.Contains(string(out), `"flaglint.go.direct-launchdarkly"`) {
+		t.Errorf("SARIF output missing Go-namespaced rule ID, got:\n%s", out)
+	}
+}
+
+// TestCLI_baselineRoundTrip exercises the primary CI-adoption workflow end
+// to end: write a baseline, add a new finding, confirm --fail-on-new only
+// fails on the new one. This is exactly the round-trip flaglint-js's own
+// architectural review flagged as an untested gap when it audited that
+// project — verified here from day one rather than retrofitted later.
+func TestCLI_baselineRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, filepath.Join(dir, "flags.go"), sampleService)
+	baselinePath := filepath.Join(dir, "baseline.json")
+
+	if err := exec.Command(binPath, "audit", dir, "--write-baseline", baselinePath).Run(); err != nil {
+		t.Fatalf("audit --write-baseline failed: %v", err)
+	}
+	if _, err := os.Stat(baselinePath); err != nil {
+		t.Fatalf("baseline file not written: %v", err)
+	}
+
+	// No new findings yet — --fail-on-new must pass.
+	if err := exec.Command(binPath, "validate", dir, "--baseline", baselinePath, "--fail-on-new").Run(); err != nil {
+		t.Fatalf("validate --baseline --fail-on-new should pass with no new findings, got: %v", err)
+	}
+
+	// Add a new finding.
+	writeGoFile(t, filepath.Join(dir, "more.go"), `package svc
+
+import (
+	"time"
+
+	ld "github.com/launchdarkly/go-server-sdk/v7"
+)
+
+func RunMore() {
+	client, _ := ld.MakeClient("sdk-key", 5*time.Second)
+	_, _ = client.StringVariation("brand-new-flag", nil, "x")
+}
+`)
+
+	cmd := exec.Command(binPath, "validate", dir, "--baseline", baselinePath, "--fail-on-new")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError after adding a new finding, got %v", err)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1", exitErr.ExitCode())
+	}
+	if !strings.Contains(stderr.String(), "brand-new-flag") {
+		t.Errorf("stderr missing the new finding's fingerprint, got:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "checkout-v2") {
+		t.Errorf("stderr must not list the already-baselined finding as new, got:\n%s", stderr.String())
+	}
+}
+
+func TestCLI_validate_malformedBaselineExits2(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, filepath.Join(dir, "flags.go"), sampleService)
+	baselinePath := filepath.Join(dir, "bad-baseline.json")
+	writeGoFile(t, baselinePath, `{not valid json`)
+
+	cmd := exec.Command(binPath, "validate", dir, "--baseline", baselinePath, "--fail-on-new")
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %v", err)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2", exitErr.ExitCode())
+	}
+}
