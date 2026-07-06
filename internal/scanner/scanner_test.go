@@ -153,6 +153,52 @@ func TestScanFile_falsePositiveParamTypedUnrelated(t *testing.T) {
 	}
 }
 
+// TestScanFiles_crossPackageFieldIsolation reproduces a real bug found in
+// review: whole-scan struct-field binding was originally keyed by bare
+// "TypeName.Field" text in one flat map across the entire scan, so a
+// genuinely bound "Service.Client" in one package would incorrectly also
+// match an unrelated, unconnected "Service.Client" in a completely
+// different package that happens to share both names. Struct-field
+// bindings must be partitioned per-package.
+func TestScanFiles_crossPackageFieldIsolation(t *testing.T) {
+	usages := parseFixtures(t,
+		"pkgisolation/realfield/service.go",
+		"pkgisolation/unrelatedfield/service.go",
+	)
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "pkg-isolation-field-flag" || got.File != "pkgisolation/realfield/service.go" {
+		t.Errorf("usages[0] = %+v, want pkg-isolation-field-flag from realfield/service.go only", got)
+	}
+}
+
+// TestScanFiles_crossPackageVarIsolation is the same class of bug as
+// TestScanFiles_crossPackageFieldIsolation, for package-level vars instead
+// of struct fields.
+func TestScanFiles_crossPackageVarIsolation(t *testing.T) {
+	usages := parseFixtures(t,
+		"pkgisolation/realvar/client.go",
+		"pkgisolation/unrelatedvar/client.go",
+	)
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "pkg-isolation-var-flag" || got.File != "pkgisolation/realvar/client.go" {
+		t.Errorf("usages[0] = %+v, want pkg-isolation-var-flag from realvar/client.go only", got)
+	}
+}
+
+func TestScanFile_positiveTripleLevelChain(t *testing.T) {
+	usages := parseFixture(t, "positive_triplelevel_chain.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "triplelevel-flag" {
+		t.Errorf("usages[0] = %+v, want triplelevel-flag (three-level chain o.middle.integ.ldClient)", got)
+	}
+}
+
 func TestScanFile_positiveGenericReceiver(t *testing.T) {
 	usages := parseFixture(t, "positive_generic_receiver.go")
 	if len(usages) != 1 {

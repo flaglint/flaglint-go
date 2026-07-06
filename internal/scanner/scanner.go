@@ -141,17 +141,30 @@ func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFi
 	// doesn't) and factory functions (naturally a no-op for a file with no
 	// SDK import, since returnsSDKClient checks against that file's own
 	// traced aliases).
-	structFieldTypes := map[string]string{}
+	//
+	// structFieldTypes is partitioned per-package (pkgKey -> "Type.Field" ->
+	// declared field type), NOT one flat map across the whole scan: Go lets
+	// two unrelated packages independently declare same-named structs and
+	// fields (two different "Service.Client", say), and an unqualified flat
+	// map would let one package's struct shape leak into another's chain
+	// resolution — the same class of false positive ADR 002 exists to
+	// prevent, just at struct-field granularity instead of variable-name
+	// granularity. Bare identifiers are never visible outside their own
+	// package in real Go anyway, so this partitioning also just matches
+	// actual Go semantics.
+	structFieldTypesByPkg := map[string]map[string]string{}
 	factoryFunctions := map[factoryKey]string{}
 	for _, pf := range parsed {
+		pkg := pkgBindings(structFieldTypesByPkg, ownPkgKey[pf.file])
 		for k, v := range collectStructFieldTypes(pf.file) {
-			structFieldTypes[k] = v
+			pkg[k] = v
 		}
 		collectFactoryFunctions(pf.file, ownPkgKey[pf.file], pf.imports, factoryFunctions)
 	}
 
 	// Pre-pass 3: per-file contexts, now that every whole-scan index above
-	// is complete.
+	// is complete. Each file's structFieldTypes is scoped to its own
+	// package's partition only — see the comment above.
 	ctxs := make(map[*ast.File]fileContext, len(parsed))
 	for _, pf := range parsed {
 		ctxs[pf.file] = fileContext{
@@ -159,24 +172,31 @@ func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFi
 			ownPkgKey:        ownPkgKey[pf.file],
 			importAliases:    resolveImportAliases(pf.file, importPathToPkgKey, importPathToPkgName),
 			factoryFunctions: factoryFunctions,
-			structFieldTypes: structFieldTypes,
+			structFieldTypes: pkgBindings(structFieldTypesByPkg, ownPkgKey[pf.file]),
 		}
 	}
 
 	// Pass A: package-level vars, direct field assignments, and every
-	// function scope's local bindings — merged into one whole-scan `base`.
-	// Struct fields and package vars are not function- or file-scoped in
-	// real Go semantics (ADR 002), so — unlike local variables — they're
-	// resolved across the entire scan, not per file.
-	base := map[string]string{}
+	// function scope's local bindings — merged into `base`, partitioned
+	// per-package for the same reason as structFieldTypes above: an
+	// unqualified package-level `var client = ...` or struct field
+	// `Service.Client` in one package must never resolve a same-named
+	// binding in a completely unrelated package. Struct fields and package
+	// vars are not *function*- or *file*-scoped in real Go semantics
+	// (ADR 002), so — unlike local variables — they're resolved across
+	// every file in their own package, not just the one file that declares
+	// them; but they remain scoped to that one package, matching how an
+	// unqualified identifier is only ever visible within its own package.
+	base := map[string]map[string]string{}
 	fileScopes := make(map[*ast.File][]funcScope, len(parsed))
 	for _, pf := range parsed {
 		ctx := ctxs[pf.file]
+		pkg := pkgBindings(base, ctx.ownPkgKey)
 		for k, v := range collectPackageLevelBindings(pf.file, ctx) {
-			base[k] = v
+			pkg[k] = v
 		}
 		for k, v := range collectFieldBindings(pf.file, ctx) {
-			base[k] = v
+			pkg[k] = v
 		}
 		fileScopes[pf.file] = collectFuncScopes(pf.file, ctx.imports)
 	}
@@ -187,12 +207,25 @@ func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFi
 	// same function, not just a direct constructor call), so this can't
 	// run until every scope's local bindings are computable, which needs
 	// `base` from Pass A first.
+	//
+	// Known limitation: this is a single forward pass over `parsed`
+	// (sorted by relative path), not a fixed-point iteration. A composite
+	// literal in file A that itself depends on a composite-literal binding
+	// established in file B only resolves if B happens to be processed
+	// before A — a wrapper-of-wrapper split across two files, chained
+	// through this pass specifically (as opposed to the two-level struct
+	// field chains qualifiedFieldKey/resolveChainType resolve directly via
+	// structFieldTypes, which aren't order-dependent). Not found in any of
+	// the field-tested real repos; consistent with this scanner's "false
+	// negative over false positive" philosophy (ADR 002) — worth
+	// revisiting as a fixed-point loop if a real case surfaces.
 	for _, pf := range parsed {
 		ctx := ctxs[pf.file]
+		pkg := pkgBindings(base, ctx.ownPkgKey)
 		for _, s := range fileScopes[pf.file] {
-			local := collectScopedBindings(s.body, mergeBindings(base, s.paramBindings), ctx)
+			local := collectScopedBindings(s.body, mergeBindings(pkg, s.paramBindings), ctx)
 			for k, v := range collectCompositeLiteralFieldBindings(s.body, local, ctx) {
-				base[k] = v
+				pkg[k] = v
 			}
 		}
 	}
@@ -203,9 +236,10 @@ func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFi
 	var allUsages []types.FlagUsage
 	for _, pf := range parsed {
 		ctx := ctxs[pf.file]
+		pkg := pkgBindings(base, ctx.ownPkgKey)
 		d := &fileDetector{fset: fset, relPath: pf.relPath}
 		for _, s := range fileScopes[pf.file] {
-			d.detect(s.body, collectScopedBindings(s.body, mergeBindings(base, s.paramBindings), ctx), s.declared, ctx.structFieldTypes)
+			d.detect(s.body, collectScopedBindings(s.body, mergeBindings(pkg, s.paramBindings), ctx), s.declared, ctx.structFieldTypes)
 		}
 		allUsages = append(allUsages, d.usages...)
 	}
@@ -214,6 +248,20 @@ func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFi
 		allUsages = []types.FlagUsage{}
 	}
 	return allUsages
+}
+
+// pkgBindings returns byPkg's inner map for pkgKey, creating it on first
+// use. Every whole-scan binding index that isn't already qualified by a
+// real Go identity (factoryFunctions is keyed by pkgKey+funcName directly)
+// is partitioned this way — see the comments at structFieldTypesByPkg and
+// base in runWholeScanAnalysis for why.
+func pkgBindings(byPkg map[string]map[string]string, pkgKey string) map[string]string {
+	m, ok := byPkg[pkgKey]
+	if !ok {
+		m = map[string]string{}
+		byPkg[pkgKey] = m
+	}
+	return m
 }
 
 // funcScope is one function/method/closure body worth detecting usages in,

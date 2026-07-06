@@ -111,6 +111,23 @@ that motivated it:
   (`func (f *FeatureFlag[T]) M()`) silently failed to resolve its own
   type, breaking every chain rooted at one. weaviate's `FeatureFlag[T]` is
   exactly this shape.
+- **Struct field types and package-level/struct-field bindings must be
+  partitioned per-package, not one flat map across the whole scan.**
+  Found in independent review, before merge: an early version of this PR
+  merged `structFieldTypes` and `base` (package vars + direct field
+  assignments) into one global `map[string]string` across every parsed
+  file, keyed by bare `"TypeName.Field"` or bare identifier text.
+  `factoryFunctions` was correctly keyed by `factoryKey{pkgKey, funcName}`
+  from the start — but the other two weren't, and Go allows any two
+  unrelated packages to independently declare a same-named struct/field/
+  var (`Service.Client`, `client`, ...). That produced a real, reproducible
+  false positive: a genuinely bound `Service.Client` in one package would
+  incorrectly also match a same-named, unconnected `Service.Client` in a
+  totally unrelated package. Fixed by partitioning both indices by `pkgKey`
+  (`structFieldTypesByPkg`, `base` in `scanner.go`, via the `pkgBindings`
+  helper) — matching real Go semantics, where an unqualified identifier is
+  only ever visible within its own package anyway. Regression fixtures:
+  `testdata/fixtures/pkgisolation/{realfield,unrelatedfield,realvar,unrelatedvar}/`.
 
 ## Not Covered (still deferred)
 
@@ -145,7 +162,9 @@ as one-off syntactic special cases.
   model (multiple passes over every parsed file rather than one): ~2.3s
   for a 4,500-file real repository, up from ~1s. Still well within
   interactive use; not yet a concern.
-- Every capability above shipped with both a positive fixture (proving it
-  fires) and a false-positive fixture (proving it doesn't fire on a
-  same-named-but-unrelated type, function, or import) — see
-  `internal/scanner/testdata/fixtures/`.
+- Every capability above shipped with a positive fixture (proving it
+  fires) and at least one false-positive fixture (proving it doesn't fire
+  on a same-named-but-unrelated type, function, parameter, or import) —
+  see `internal/scanner/testdata/fixtures/`, including the
+  `pkgisolation/` pair proving cross-package struct-field and
+  package-var isolation specifically (the review-caught bug above).
