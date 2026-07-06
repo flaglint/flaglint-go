@@ -42,10 +42,15 @@ scanner is syntax-only, no build required.
 go install github.com/flaglint/flaglint-go/cmd/flaglint-go@latest
 ```
 
-Prebuilt release binaries publish automatically once a version tag is cut —
-see [.goreleaser.yaml](.goreleaser.yaml). A Homebrew formula
-(`flaglint/tap/flaglint-go`) is planned but not yet published — its
-publishing step needs a cross-repo token that isn't configured yet.
+Prebuilt release binaries and a Homebrew formula (`flaglint/tap/flaglint-go`)
+publish automatically once a version tag is cut — see
+[.goreleaser.yaml](.goreleaser.yaml). Homebrew publishing was disabled for
+the `v0.1.0` release (its cross-repo token wasn't configured yet) and takes
+effect starting with the next tagged release.
+
+```bash
+brew install flaglint/tap/flaglint-go
+```
 
 ## Usage
 
