@@ -19,10 +19,6 @@ type sdkImports struct {
 	dotImported map[string]bool   // "v6"/"v7" -> true, if dot-imported in this file
 }
 
-func (s sdkImports) present() bool {
-	return len(s.aliases) > 0 || len(s.dotImported) > 0
-}
-
 // traceSDKImports walks file's import declarations for the LaunchDarkly Go
 // SDK (v6 or v7) and records whatever local alias is in play — this is the
 // only source of truth for client identity; see ADR 002.
@@ -102,10 +98,35 @@ func isConstructorName(name string) bool {
 	return name == "MakeClient" || name == "MakeCustomClient"
 }
 
+// fileContext bundles the whole-scan and per-file state needed to resolve
+// client identity for one file, so the binding-collection functions below
+// don't need an ever-growing parameter list every time cross-file
+// resolution gains a new capability (factory functions, multi-level field
+// chains, ...).
+type fileContext struct {
+	imports sdkImports
+
+	// ownPkgKey identifies this file's own package for same-package bare
+	// factory calls (`FuncName()`) — see factory.go.
+	ownPkgKey string
+	// importAliases maps this file's local import identifiers to the
+	// pkgKey of *our own scanned packages* only (see resolveImportAliases)
+	// — used to resolve cross-package factory calls (`pkgAlias.FuncName()`).
+	importAliases map[string]string
+	// factoryFunctions is the whole-scan index of functions whose declared
+	// return type resolves to the SDK client type (see factory.go).
+	factoryFunctions map[factoryKey]string
+
+	// structFieldTypes is the whole-scan index of "StructName.Field" ->
+	// declared field type name (see structtypes.go), used to walk
+	// multi-level field-selector chains one hop at a time.
+	structFieldTypes map[string]string
+}
+
 // collectPackageLevelBindings finds client bindings established by
 // top-level `var` declarations (file.Decls only — never descends into a
 // function body), which are visible to every function in the file.
-func collectPackageLevelBindings(file *ast.File, imports sdkImports) map[string]string {
+func collectPackageLevelBindings(file *ast.File, ctx fileContext) map[string]string {
 	bindings := map[string]string{}
 	for _, decl := range file.Decls {
 		gen, ok := decl.(*ast.GenDecl)
@@ -117,7 +138,7 @@ func collectPackageLevelBindings(file *ast.File, imports sdkImports) map[string]
 			if !ok {
 				continue
 			}
-			bindFromValueSpec(vs, imports, bindings)
+			bindFromValueSpecOrFactoryCall(vs, ctx, bindings)
 		}
 	}
 	return bindings
@@ -150,7 +171,7 @@ func collectPackageLevelBindings(file *ast.File, imports sdkImports) map[string]
 // (ADR 002): local variable struct construction with an inferred type is
 // deferred to the opt-in --strict-types pass, which has real type
 // information and does not need this restriction.
-func collectFieldBindings(file *ast.File, imports sdkImports) map[string]string {
+func collectFieldBindings(file *ast.File, ctx fileContext) map[string]string {
 	bindings := map[string]string{}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -169,7 +190,7 @@ func collectFieldBindings(file *ast.File, imports sdkImports) map[string]string 
 				if !ok {
 					continue
 				}
-				version, ok := isSDKConstructorCall(call, imports)
+				version, ok := isSDKConstructorCall(call, ctx.imports)
 				if !ok || i >= len(assign.Lhs) {
 					continue
 				}
@@ -177,7 +198,7 @@ func collectFieldBindings(file *ast.File, imports sdkImports) map[string]string 
 				if !ok {
 					continue
 				}
-				if key := qualifiedFieldKey(sel, declared); key != "" {
+				if key := qualifiedFieldKey(sel, declared, ctx.structFieldTypes); key != "" {
 					bindings[key] = version
 				}
 			}
@@ -224,8 +245,19 @@ func paramTypesFromFieldList(fl *ast.FieldList) map[string]string {
 }
 
 // simpleTypeName returns the bare type name for an identifier, a pointer to
-// one, or a package-qualified name (the package qualifier is dropped since
-// Phase 1 does not resolve cross-package types) — "" for anything else.
+// one, a package-qualified name (the package qualifier is dropped since
+// Phase 1 does not resolve cross-package types), or a generic
+// instantiation/receiver (`FeatureFlag[T]`, `Map[K, V]` — the type
+// arguments are dropped, only the base name matters for identity
+// resolution) — "" for anything else.
+//
+// Found missing during field-testing against weaviate/weaviate: a method
+// receiver on a generic struct (`func (f *FeatureFlag[T]) M()`) has type
+// *ast.IndexExpr (single type param) or *ast.IndexListExpr (multiple), not
+// the plain *ast.StarExpr/*ast.Ident this originally handled — so
+// declaredParamTypes silently failed to resolve the receiver's type at
+// all for any method on a generic struct, breaking every multi-level
+// chain resolution rooted at one.
 func simpleTypeName(expr ast.Expr) string {
 	switch t := expr.(type) {
 	case *ast.Ident:
@@ -234,25 +266,49 @@ func simpleTypeName(expr ast.Expr) string {
 		return simpleTypeName(t.X)
 	case *ast.SelectorExpr:
 		return t.Sel.Name
+	case *ast.IndexExpr:
+		return simpleTypeName(t.X)
+	case *ast.IndexListExpr:
+		return simpleTypeName(t.X)
 	default:
 		return ""
 	}
 }
 
-// qualifiedFieldKey resolves a single-level field selector ("s.Client") to
-// "TypeName.Field" using declared, or "" if the receiver's type isn't known
-// (see collectFieldBindings for why that means "don't bind"). Multi-level
-// selectors (s.Nested.Client) are out of Phase 1 scope and return "".
-func qualifiedFieldKey(sel *ast.SelectorExpr, declared map[string]string) string {
-	recv, ok := sel.X.(*ast.Ident)
-	if !ok {
+// qualifiedFieldKey resolves a field selector — single-level ("s.Client")
+// or multi-level ("f.ldInteg.ldClient") — to "TypeName.Field" for the
+// *final* hop. Everything up to (but not including) the final field is
+// resolved by resolveChainType, walking one hop at a time through
+// structFieldTypes (a struct's own field-type declarations, collected
+// whole-scan — see structtypes.go). Returns "" if any hop can't be
+// resolved this way (see collectFieldBindings for why that means "don't
+// bind" rather than guess).
+func qualifiedFieldKey(sel *ast.SelectorExpr, declared, structFieldTypes map[string]string) string {
+	baseType := resolveChainType(sel.X, declared, structFieldTypes)
+	if baseType == "" {
 		return ""
 	}
-	typeName, ok := declared[recv.Name]
-	if !ok {
+	return baseType + "." + sel.Sel.Name
+}
+
+// resolveChainType resolves the declared *type* of expr — an identifier
+// (via declared, the enclosing function's receiver/parameter types) or a
+// field-selector chain (recursing through structFieldTypes one hop at a
+// time). Used internally by qualifiedFieldKey to walk every hop of a
+// multi-level chain except the last.
+func resolveChainType(expr ast.Expr, declared, structFieldTypes map[string]string) string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return declared[e.Name]
+	case *ast.SelectorExpr:
+		innerType := resolveChainType(e.X, declared, structFieldTypes)
+		if innerType == "" {
+			return ""
+		}
+		return structFieldTypes[innerType+"."+e.Sel.Name]
+	default:
 		return ""
 	}
-	return typeName + "." + sel.Sel.Name
 }
 
 // collectScopedBindings returns a copy of base extended with every *local
@@ -267,8 +323,11 @@ func qualifiedFieldKey(sel *ast.SelectorExpr, declared map[string]string) string
 // see their enclosing function's bindings, because they are walked as part
 // of the same scope.
 //
-// Indirection through a factory function or interface satisfaction is a
-// known Phase 1 gap, deferred to the opt-in --strict-types pass (ADR 002).
+// Interface satisfaction (a value only known through an interface type,
+// not a concrete client-typed variable) remains a known Phase 1 gap,
+// deferred to the opt-in --strict-types pass (ADR 002). Indirection through
+// a factory *function* is handled here via ctx.factoryFunctions — see
+// factory.go for why this specific sub-case doesn't need go/types.
 //
 // Known Phase 1 limitation: this map is flat across the whole function, not
 // block-scoped. A deliberate re-`:=` of the same name inside a nested block
@@ -280,7 +339,7 @@ func qualifiedFieldKey(sel *ast.SelectorExpr, declared map[string]string) string
 // pattern most Go style guides (and `go vet -shadow`) already discourage.
 // Full block scoping is deferred rather than risk destabilizing this fix
 // under time pressure; tracked for a future pass if it proves necessary.
-func collectScopedBindings(scope ast.Node, base map[string]string, imports sdkImports) map[string]string {
+func collectScopedBindings(scope ast.Node, base map[string]string, ctx fileContext) map[string]string {
 	bindings := make(map[string]string, len(base))
 	for k, v := range base {
 		bindings[k] = v
@@ -294,7 +353,10 @@ func collectScopedBindings(scope ast.Node, base map[string]string, imports sdkIm
 				if !ok {
 					continue
 				}
-				version, ok := isSDKConstructorCall(call, imports)
+				version, ok := isSDKConstructorCall(call, ctx.imports)
+				if !ok {
+					version, ok = isFactoryCall(call, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions)
+				}
 				if !ok || i >= len(node.Lhs) {
 					continue
 				}
@@ -306,11 +368,71 @@ func collectScopedBindings(scope ast.Node, base map[string]string, imports sdkIm
 				}
 			}
 		case *ast.ValueSpec:
-			bindFromValueSpec(node, imports, bindings)
+			bindFromValueSpecOrFactoryCall(node, ctx, bindings)
 		}
 		return true
 	})
 
+	return bindings
+}
+
+// collectCompositeLiteralFieldBindings finds struct-field bindings
+// established via composite literal — `&LDIntegration{ldClient: ldClient}`
+// or `LDIntegration{ldClient: ldClient}` — where the field value is either
+// a direct SDK constructor call or an identifier already known to be bound
+// (via knownBindings, which the caller builds from package-level vars,
+// direct field assignments, and this scope's own local variables). Found
+// missing during field-testing against real-world code (weaviate,
+// e2b-dev/infra both use this exact pattern to store a client into a
+// wrapper struct) — collectFieldBindings only recognized `x.Field = value`
+// assignment, not literal initialization.
+//
+// Keys are type-qualified ("LDIntegration.ldClient"), matching
+// collectFieldBindings, for the same cross-type-collision reason.
+func collectCompositeLiteralFieldBindings(scope ast.Node, knownBindings map[string]string, ctx fileContext) map[string]string {
+	bindings := map[string]string{}
+	ast.Inspect(scope, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		typeName := simpleTypeName(lit.Type)
+		if typeName == "" {
+			return true
+		}
+		for _, elt := range lit.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			fieldIdent, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			var version string
+			switch v := unparen(kv.Value).(type) {
+			case *ast.CallExpr:
+				ver, ok := isSDKConstructorCall(v, ctx.imports)
+				if !ok {
+					ver, ok = isFactoryCall(v, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions)
+				}
+				if !ok {
+					continue
+				}
+				version = ver
+			case *ast.Ident:
+				ver, ok := knownBindings[v.Name]
+				if !ok {
+					continue
+				}
+				version = ver
+			default:
+				continue
+			}
+			bindings[typeName+"."+fieldIdent.Name] = version
+		}
+		return true
+	})
 	return bindings
 }
 
@@ -329,13 +451,19 @@ func mergeBindings(a, b map[string]string) map[string]string {
 	return merged
 }
 
-func bindFromValueSpec(vs *ast.ValueSpec, imports sdkImports, bindings map[string]string) {
+// bindFromValueSpecOrFactoryCall handles both `var x = ld.MakeClient(...)`
+// and `var x = pkg.SomeFactoryFunc(...)` forms for a single ValueSpec (used
+// for both package-level `var` and local `var` inside a function body).
+func bindFromValueSpecOrFactoryCall(vs *ast.ValueSpec, ctx fileContext, bindings map[string]string) {
 	for i, rhs := range vs.Values {
 		call, ok := rhs.(*ast.CallExpr)
 		if !ok {
 			continue
 		}
-		version, ok := isSDKConstructorCall(call, imports)
+		version, ok := isSDKConstructorCall(call, ctx.imports)
+		if !ok {
+			version, ok = isFactoryCall(call, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions)
+		}
 		if !ok || i >= len(vs.Names) {
 			continue
 		}
@@ -348,18 +476,19 @@ func bindFromValueSpec(vs *ast.ValueSpec, imports sdkImports, bindings map[strin
 // resolveReceiver returns the bindings-map key for a method call's receiver
 // expression: a plain identifier resolves to its own name (local variable
 // or package-level var lookup, unaffected by field type-qualification); a
-// single-level field selector ("s.Client") resolves through declared to
-// "TypeName.Client" — matching how collectFieldBindings keys struct-field
-// bindings. It deliberately never falls back to the raw "s.Client" text,
+// field selector — single-level ("s.Client") or multi-level
+// ("f.ldInteg.ldClient") — resolves through qualifiedFieldKey to
+// "TypeName.Client", matching how collectFieldBindings keys struct-field
+// bindings. It deliberately never falls back to the raw selector text,
 // which would reintroduce the cross-type collision collectFieldBindings's
 // type-qualification exists to prevent. Anything else (index expressions,
-// calls, multi-level selectors) returns "".
-func resolveReceiver(recv ast.Expr, declared map[string]string) string {
+// calls) returns "".
+func resolveReceiver(recv ast.Expr, declared, structFieldTypes map[string]string) string {
 	switch e := recv.(type) {
 	case *ast.Ident:
 		return e.Name
 	case *ast.SelectorExpr:
-		return qualifiedFieldKey(e, declared)
+		return qualifiedFieldKey(e, declared, structFieldTypes)
 	default:
 		return ""
 	}

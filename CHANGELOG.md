@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Whole-scan identity resolution (ADR 004), closing real-world indirection
+  gaps found by field-testing against launchdarkly-labs/ld-sample-app-go,
+  weaviate/weaviate, CMS-Enterprise/mint-app, and e2b-dev/infra — all
+  without requiring `go/types` or a buildable module:
+  - Composite-literal struct-field binding (`&LDIntegration{ldClient: client}`).
+  - Multi-level field-selector chains (`f.integ.ldClient.Method(...)`),
+    including through generic structs (`FeatureFlag[T]`).
+  - Cross-package factory/getter-function resolution
+    (`pkgAlias.GetLdClient()`), resolved via real `go.mod`-derived import
+    paths — never a name-based heuristic.
+  - Parameter-typed client bindings — a function parameter declared as
+    `*ld.LDClient` is bound from its type alone, no assignment required.
+  - Package-level `var` and struct-field bindings now resolve across the
+    whole scan, not just within one file.
+  - Fixed: `simpleTypeName` didn't recognize Go generic type
+    instantiations/receivers (`*ast.IndexExpr`/`*ast.IndexListExpr`),
+    silently failing to resolve any method receiver on a generic struct.
+
 - Project scaffold: Go module, LICENSE, CONTRIBUTING, CI conventions.
 - `flaglint-go scan` — inventory report (JSON/Markdown) of LaunchDarkly Go
   SDK usage, always exits 0 unless there's a tool error.
