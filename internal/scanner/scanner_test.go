@@ -392,6 +392,37 @@ func TestScanFile_falsePositiveBlockScopedShadowing(t *testing.T) {
 	}
 }
 
+func TestScanFile_positiveMethodValue(t *testing.T) {
+	usages := parseFixture(t, "positive_method_value.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "method-value-flag" {
+		t.Errorf("usages[0] = %+v, want method-value-flag (f := client.BoolVariation; f(...) — issue #6)", got)
+	}
+}
+
+func TestScanFile_falsePositiveMethodValueUnrelated(t *testing.T) {
+	usages := parseFixture(t, "false_positive_method_value_unrelated.go")
+	if len(usages) != 0 {
+		t.Errorf("got %d usages, want 0 — a method value from an unrelated, unbound type must not be detected: %+v", len(usages), usages)
+	}
+}
+
+func TestScanFile_positiveMethodValueBlockScopedShadowing(t *testing.T) {
+	usages := parseFixture(t, "positive_method_value_block_scoped.go")
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want exactly 2 (before-loop and after-loop method-value flags) — a re-`:=` of the method-value identifier inside a nested block must shadow it only within that block: %+v", len(usages), usages)
+	}
+	got := map[string]bool{}
+	for _, u := range usages {
+		got[u.FlagKey] = true
+	}
+	if !got["before-loop-method-value-flag"] || !got["after-loop-method-value-flag"] {
+		t.Errorf("usages = %+v, want before-loop-method-value-flag and after-loop-method-value-flag", usages)
+	}
+}
+
 func TestScanFile_falsePositiveCrossTypeFieldCollision(t *testing.T) {
 	usages := parseFixture(t, "false_positive_cross_type_field_collision.go")
 	if len(usages) != 1 {
