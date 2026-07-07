@@ -242,6 +242,36 @@ func TestScanFiles_falsePositiveCrossPackageFactoryFunctionUnrelated(t *testing.
 	}
 }
 
+func TestScanFile_positiveChainedFactoryCall(t *testing.T) {
+	usages := parseFixture(t, "positive_chained_factory_call.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "chained-factory-flag" {
+		t.Errorf("usages[0] = %+v, want chained-factory-flag (chainedFactory().BoolVariation(...) — no intermediate variable, issue #20)", got)
+	}
+}
+
+func TestScanFiles_positiveChainedCrossPackageFactoryCall(t *testing.T) {
+	usages := parseFixtures(t,
+		"crosspkg/producer/client.go",
+		"crosspkg/consumer_chained/main.go",
+	)
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "chained-cross-package-flag" {
+		t.Errorf("usages[0] = %+v, want chained-cross-package-flag (producer.GetLdClient().BoolVariation(...) — no intermediate variable)", got)
+	}
+}
+
+func TestScanFile_falsePositiveChainedCallUnrelated(t *testing.T) {
+	usages := parseFixture(t, "false_positive_chained_call_unrelated.go")
+	if len(usages) != 0 {
+		t.Errorf("got %d usages, want 0 — a chained call on a non-factory function must not be detected: %+v", len(usages), usages)
+	}
+}
+
 func TestScanFile_positiveVariety(t *testing.T) {
 	usages := parseFixture(t, "positive_variety.go")
 	if len(usages) != 5 {

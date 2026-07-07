@@ -359,13 +359,24 @@ func (d *fileDetector) detect(scope ast.Node, bindings, declared, structFieldTyp
 		if !ok {
 			return
 		}
-		receiver := resolveReceiver(sel.X, declared, structFieldTypes)
-		if receiver == "" {
-			return
-		}
-		version, bound := current[receiver]
+
+		// A chained call — `pkg.GetLdClient().Method(...)`, no
+		// intermediate variable (issue #20) — has the receiver's version
+		// known directly from the inner call itself; resolveAssignedBinding
+		// already does exactly this "is this a recognized constructor/
+		// factory call" check for assignment RHS values, and applies here
+		// unchanged. Only fall back to the bindings-map lookup when the
+		// receiver isn't itself such a call.
+		version, bound := resolveAssignedBinding(unparen(sel.X), ctx)
 		if !bound {
-			return
+			receiver := resolveReceiver(sel.X, declared, structFieldTypes)
+			if receiver == "" {
+				return
+			}
+			version, bound = current[receiver]
+			if !bound {
+				return
+			}
 		}
 		spec, known := methodSpecs[sel.Sel.Name]
 		if !known {
