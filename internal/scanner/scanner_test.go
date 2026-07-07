@@ -42,11 +42,7 @@ func parseFixtures(t *testing.T, names ...string) []types.FlagUsage {
 			imports: traceSDKImports(file),
 		})
 	}
-	absRoot, err := filepath.Abs(".")
-	if err != nil {
-		t.Fatalf("Abs(.) error = %v", err)
-	}
-	return runWholeScanAnalysis(fset, absRoot, parsed)
+	return runWholeScanAnalysis(fset, parsed)
 }
 
 func TestScanFile_positiveBasic(t *testing.T) {
@@ -239,6 +235,19 @@ func TestScanFiles_falsePositiveCrossPackageFactoryFunctionUnrelated(t *testing.
 	)
 	if len(usages) != 0 {
 		t.Errorf("got %d usages, want 0 — a same-named factory function returning an unrelated type must not be detected: %+v", len(usages), usages)
+	}
+}
+
+func TestScanFiles_positiveNestedGoModSubmodule(t *testing.T) {
+	usages := parseFixtures(t,
+		"monorepo/submodule/producer/client.go",
+		"monorepo/consumer/main.go",
+	)
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "monorepo-submodule-flag" {
+		t.Errorf("usages[0] = %+v, want monorepo-submodule-flag (consumer/main.go resolves against the outer go.mod, submodule/producer/client.go resolves against its own nested go.mod — issue #17)", got)
 	}
 }
 
