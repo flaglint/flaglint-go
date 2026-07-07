@@ -4,6 +4,7 @@ import (
 	"go/token"
 	"path/filepath"
 	"sort"
+	"strconv"
 
 	"golang.org/x/tools/go/packages"
 
@@ -101,24 +102,42 @@ func strictTypesUsages(pkgs []*packages.Package, absRoot string) []types.FlagUsa
 }
 
 // mergeStrictTypesUsages folds extra into result in place, keeping every
-// existing entry byte-for-byte unchanged and adding only fingerprints
+// existing entry byte-for-byte unchanged and adding only call sites
 // result doesn't already have — the additive guarantee ADR 005 promises,
 // enforced here rather than assumed from strictTypesUsages happening to be
 // a superset of Scan's own result for the files it covers.
+//
+// Deduping by (File, Line, Column) — a real call site's precise position,
+// identical between Phase 1's and the strict pass's independent parses of
+// the same source text — not by Fingerprint: fingerprint.Generate
+// (internal/fingerprint) deliberately omits line/column (it's a
+// cross-tool-contract baseline identity, meant to survive line-number
+// churn from unrelated edits elsewhere in the file), so two genuinely
+// different call sites in the same file sharing a callType and a static
+// flag key produce the *same* fingerprint. Deduping on fingerprint alone
+// would silently drop a real strict-types-only finding whenever it
+// happened to collide with an unrelated Phase 1 finding's fingerprint —
+// found via independent review, reproduced directly (two same-flag-key
+// call sites in one file, one Phase-1-visible, one interface-satisfaction-
+// only: the second vanished with no warning).
 func mergeStrictTypesUsages(result *types.ScanResult, extra []types.FlagUsage) {
 	if len(extra) == 0 {
 		return
 	}
+	callSiteKey := func(u types.FlagUsage) string {
+		return u.File + ":" + strconv.Itoa(u.Line) + ":" + strconv.Itoa(u.Column)
+	}
 	seen := make(map[string]bool, len(result.Usages))
 	for _, u := range result.Usages {
-		seen[u.Fingerprint] = true
+		seen[callSiteKey(u)] = true
 	}
 	added := false
 	for _, u := range extra {
-		if seen[u.Fingerprint] {
+		key := callSiteKey(u)
+		if seen[key] {
 			continue
 		}
-		seen[u.Fingerprint] = true
+		seen[key] = true
 		// Only stamped on entries that actually survive the dedup above —
 		// an entry strictTypesUsages also happened to (re-)find that Phase
 		// 1 already reported keeps its original DetectedBy ("", meaning
