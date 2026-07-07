@@ -7,6 +7,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/flaglint/flaglint-go/internal/config"
+	"github.com/flaglint/flaglint-go/internal/scanner"
+	"github.com/flaglint/flaglint-go/internal/types"
 )
 
 // validateDirectory checks that dir exists and is a directory, returning an
@@ -46,6 +48,17 @@ func loadConfig(configPath string) (config.Config, *ExitError) {
 	return cfg, nil
 }
 
+// runScan calls scanner.Scan, or scanner.ScanStrict when strictTypes is
+// set — the single place all three commands (scan/audit/validate) decide
+// which to run, so the --strict-types flag behaves identically everywhere
+// it's exposed. See docs/adr/005-strict-types-pass.md.
+func runScan(dir string, cfg config.Config, strictTypes bool) (types.ScanResult, error) {
+	if strictTypes {
+		return scanner.ScanStrict(dir, cfg)
+	}
+	return scanner.Scan(dir, cfg)
+}
+
 // writeReport writes report to outputPath if non-empty, otherwise to the
 // command's stdout. A file-write failure is an internal error (exit 3) —
 // NOT matching flaglint-js's current shipped behavior, which calls
@@ -70,6 +83,19 @@ func writeReport(cmd *cobra.Command, report, outputPath string) error {
 	}
 	stderrInfo(cmd, "Report written to %s\n", outputPath)
 	return nil
+}
+
+// printWarning writes one scan warning to cmd's stderr, appending w's
+// Reason (only ever set for a "typecheck-failure" warning — see
+// types.ScanWarning) when present — without it, a --strict-types package
+// load failure would print only a bare package path with no clue why it
+// failed.
+func printWarning(cmd *cobra.Command, w types.ScanWarning) {
+	if w.Reason != "" {
+		stderrInfo(cmd, "warning: %s: %s: %s\n", w.Kind, w.File, w.Reason)
+		return
+	}
+	stderrInfo(cmd, "warning: %s: %s\n", w.Kind, w.File)
 }
 
 // stderrInfo writes a formatted progress/summary line to cmd's stderr,

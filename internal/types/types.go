@@ -58,6 +58,12 @@ type FlagUsage struct {
 	Language         string            `json:"language"` // additive: always "go"
 	SDK              string            `json:"sdk"`      // e.g. "go-server-sdk-v7"
 	Risk             Risk              `json:"risk"`
+	// DetectedBy is a Go-specific additive field (see ADR 005): "strict-types"
+	// for a finding only provable with real go/types information (an
+	// interface-satisfaction case ordinary syntactic tracing can't see),
+	// omitted entirely for an ordinary Phase 1 finding — so Scan's JSON
+	// output is byte-for-byte unchanged from before this field existed.
+	DetectedBy string `json:"detectedBy,omitempty"`
 }
 
 // IsStale reports whether a usage carries any staleness signal. Always false
@@ -68,9 +74,10 @@ func IsStale(u FlagUsage) bool {
 
 // ScanWarning records a non-fatal problem encountered while scanning.
 type ScanWarning struct {
-	Kind   string `json:"kind"` // "read-failure" | "parse-failure"
-	File   string `json:"file"`
+	Kind   string `json:"kind"`             // "read-failure" | "parse-failure" | "typecheck-failure"
+	File   string `json:"file"`             // for "typecheck-failure", the package path that failed to load/type-check, not a file
 	FsCode string `json:"fsCode,omitempty"` // e.g. "ENOENT", "EACCES" — only set for "read-failure"
+	Reason string `json:"reason,omitempty"` // human-readable cause — only set for "typecheck-failure"
 }
 
 // ScanResult is the top-level output of a scan, shared by audit/scan/validate.

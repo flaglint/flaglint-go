@@ -6,11 +6,11 @@ import (
 	"github.com/flaglint/flaglint-go/internal/baseline"
 	"github.com/flaglint/flaglint-go/internal/readiness"
 	"github.com/flaglint/flaglint-go/internal/reporter"
-	"github.com/flaglint/flaglint-go/internal/scanner"
 )
 
 func newAuditCommand(version string) *cobra.Command {
 	var format, output, configPath, writeBaselinePath string
+	var strictTypes bool
 
 	cmd := &cobra.Command{
 		Use:   "audit [dir]",
@@ -29,7 +29,7 @@ func newAuditCommand(version string) *cobra.Command {
 				return exitErr
 			}
 
-			result, err := scanner.Scan(dir, cfg)
+			result, err := runScan(dir, cfg, strictTypes)
 			if err != nil {
 				return internalError("scan failed: %v", err)
 			}
@@ -50,7 +50,7 @@ func newAuditCommand(version string) *cobra.Command {
 					r.LowRiskCalls, r.MediumRiskCalls, r.HighRiskCalls)
 			}
 			for _, w := range result.Warnings {
-				stderrInfo(cmd, "warning: %s: %s\n", w.Kind, w.File)
+				printWarning(cmd, w)
 			}
 
 			if writeBaselinePath != "" {
@@ -85,6 +85,7 @@ func newAuditCommand(version string) *cobra.Command {
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write report to file instead of stdout")
 	cmd.Flags().StringVar(&configPath, "config", "", "path to config file")
 	cmd.Flags().StringVar(&writeBaselinePath, "write-baseline", "", "write current finding fingerprints to a baseline file")
+	cmd.Flags().BoolVar(&strictTypes, "strict-types", false, "additionally resolve findings only provable with real go/types information (requires the module to build; see docs/adr/005-strict-types-pass.md)")
 	return cmd
 }
 

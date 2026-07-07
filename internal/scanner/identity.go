@@ -3,6 +3,7 @@ package scanner
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strconv"
 )
 
@@ -121,6 +122,12 @@ type fileContext struct {
 	// declared field type name (see structtypes.go), used to walk
 	// multi-level field-selector chains one hop at a time.
 	structFieldTypes map[string]string
+
+	// typesInfo is real go/types information for this file's package, only
+	// populated by the opt-in --strict-types pass (ScanStrict, strict.go) —
+	// nil for an ordinary Scan. See resolveAssignedBinding's fallback and
+	// docs/adr/005-strict-types-pass.md.
+	typesInfo *types.Info
 }
 
 // collectPackageLevelBindings finds client bindings established by
@@ -336,20 +343,64 @@ func opensScope(n ast.Node) bool {
 
 // resolveAssignedBinding reports what a single assignment-target position
 // should resolve to: the SDK version, if rhs is a recognized constructor
-// or factory call, or ok=false for anything else — including a value we
-// simply don't recognize. Callers that track scope (see walkScoped) must
-// treat ok=false as "actively clear any inherited binding for this name",
-// not just "don't add one" — see walkScoped's doc comment for why.
+// or factory call, if ctx carries real type information and rhs's static
+// type proves it directly (see resolveByStaticType), or ok=false for
+// anything else — including a value we simply don't recognize. Callers
+// that track scope (see walkScoped) must treat ok=false as "actively clear
+// any inherited binding for this name", not just "don't add one" — see
+// walkScoped's doc comment for why.
 func resolveAssignedBinding(rhs ast.Expr, ctx fileContext) (version string, ok bool) {
-	call, ok := rhs.(*ast.CallExpr)
-	if !ok {
+	if call, isCall := rhs.(*ast.CallExpr); isCall {
+		if version, ok := isSDKConstructorCall(call, ctx.imports); ok {
+			return version, true
+		}
+		if version, ok := isFactoryCall(call, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions); ok {
+			return version, true
+		}
+	}
+	if ctx.typesInfo != nil {
+		if version, ok := resolveByStaticType(rhs, ctx.typesInfo); ok {
+			return version, true
+		}
+	}
+	return "", false
+}
+
+// resolveByStaticType checks rhs's real static type directly against the
+// SDK's client type — only reachable when ctx.typesInfo is populated (the
+// opt-in --strict-types pass, ScanStrict; see docs/adr/005-strict-types-
+// pass.md). This is what proves identity through an interface —
+// `var evaluator FlagEvaluator = client` has neither a recognized
+// constructor call nor a factory call on its RHS for the syntax-only
+// checks above to find, but go/types can tell us directly that the value
+// underneath is really *ld.LDClient. Closes issue #15, same-scope only:
+// rhs is checked as a single expression, not traced across a function
+// boundary (that remains Phase 2b, issue #26).
+func resolveByStaticType(rhs ast.Expr, info *types.Info) (version string, ok bool) {
+	t := info.TypeOf(rhs)
+	if t == nil {
 		return "", false
 	}
-	version, ok = isSDKConstructorCall(call, ctx.imports)
-	if ok {
-		return version, true
+	ptr, isPtr := t.(*types.Pointer)
+	if !isPtr {
+		return "", false
 	}
-	return isFactoryCall(call, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions)
+	named, isNamed := ptr.Elem().(*types.Named)
+	if !isNamed || named.Obj().Name() != "LDClient" {
+		return "", false
+	}
+	pkg := named.Obj().Pkg()
+	if pkg == nil {
+		return "", false
+	}
+	switch pkg.Path() {
+	case sdkImportV6:
+		return "v6", true
+	case sdkImportV7:
+		return "v7", true
+	default:
+		return "", false
+	}
 }
 
 // methodValueBinding records that an identifier was bound to a specific

@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/flaglint/flaglint-go/internal/baseline"
-	"github.com/flaglint/flaglint-go/internal/scanner"
 	"github.com/flaglint/flaglint-go/internal/types"
 	"github.com/flaglint/flaglint-go/internal/validator"
 )
@@ -21,6 +20,7 @@ func newValidateCommand() *cobra.Command {
 		configPath       string
 		baselinePath     string
 		failOnNew        bool
+		strictTypes      bool
 	)
 
 	cmd := &cobra.Command{
@@ -44,12 +44,12 @@ func newValidateCommand() *cobra.Command {
 				return exitErr
 			}
 
-			result, err := scanner.Scan(dir, cfg)
+			result, err := runScan(dir, cfg, strictTypes)
 			if err != nil {
 				return internalError("scan failed: %v", err)
 			}
 			for _, w := range result.Warnings {
-				stderrInfo(cmd, "warning: %s: %s\n", w.Kind, w.File)
+				printWarning(cmd, w)
 			}
 
 			vOpts := validator.Options{NoDirectLaunchDarkly: noDirectLD, BootstrapExclude: bootstrapExclude}
@@ -98,6 +98,7 @@ func newValidateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&configPath, "config", "", "path to config file")
 	cmd.Flags().StringVar(&baselinePath, "baseline", "", "baseline file for comparing against known debt")
 	cmd.Flags().BoolVar(&failOnNew, "fail-on-new", false, "exit 1 if any findings are not in the baseline")
+	cmd.Flags().BoolVar(&strictTypes, "strict-types", false, "additionally resolve findings only provable with real go/types information (requires the module to build; see docs/adr/005-strict-types-pass.md)")
 	return cmd
 }
 
