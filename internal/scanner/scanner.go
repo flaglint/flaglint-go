@@ -208,30 +208,42 @@ func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFi
 	// run until every scope's local bindings are computable, which needs
 	// `base` from Pass A first.
 	//
-	// Known limitation: this is a single forward pass over `parsed`
-	// (sorted by relative path), not a fixed-point iteration. A composite
-	// literal in file A that itself depends on a composite-literal binding
-	// established in file B only resolves if B happens to be processed
-	// before A — a wrapper-of-wrapper split across two files, chained
-	// through this pass specifically (as opposed to the two-level struct
-	// field chains qualifiedFieldKey/resolveChainType resolve directly via
-	// structFieldTypes, which aren't order-dependent). Not found in any of
-	// the field-tested real repos; consistent with this scanner's "false
-	// negative over false positive" philosophy (ADR 002) — worth
-	// revisiting as a fixed-point loop if a real case surfaces.
-	for _, pf := range parsed {
-		ctx := ctxs[pf.file]
-		pkg := pkgBindings(base, ctx.ownPkgKey)
-		for _, s := range fileScopes[pf.file] {
-			walkScoped(s.body, mergeBindings(pkg, s.paramBindings), ctx, func(n ast.Node, current map[string]string) {
-				lit, ok := n.(*ast.CompositeLit)
-				if !ok {
-					return
-				}
-				for k, v := range compositeLiteralFieldBindings(lit, current, ctx) {
-					pkg[k] = v
-				}
-			})
+	// Looped to a fixed point (issue #18) rather than a single forward
+	// sweep: a composite literal in file A can itself depend on a
+	// composite-literal binding established in file B — a "wrapper-of-
+	// wrapper" split across two files — which only resolves if B happens
+	// to be processed first in a single pass. (Two-level struct field
+	// *type* chains resolved via qualifiedFieldKey/resolveChainType and
+	// structFieldTypes are NOT affected by this — only composite-literal
+	// *value* bindings that depend on another composite literal's
+	// binding.) The loop stops once a full sweep discovers nothing new;
+	// bounded by len(parsed)+1 sweeps as a safety cap that a real fixed
+	// point can never reach — a genuine wrapper-of-wrapper chain can't
+	// legitimately be deeper than the number of files in the scan, so
+	// hitting the cap without converging would only be possible from a
+	// bug, not real code.
+	for sweep := 0; sweep <= len(parsed); sweep++ {
+		changed := false
+		for _, pf := range parsed {
+			ctx := ctxs[pf.file]
+			pkg := pkgBindings(base, ctx.ownPkgKey)
+			for _, s := range fileScopes[pf.file] {
+				walkScoped(s.body, mergeBindings(pkg, s.paramBindings), ctx, func(n ast.Node, current map[string]string) {
+					lit, ok := n.(*ast.CompositeLit)
+					if !ok {
+						return
+					}
+					for k, v := range compositeLiteralFieldBindings(lit, current, ctx) {
+						if existing, ok := pkg[k]; !ok || existing != v {
+							pkg[k] = v
+							changed = true
+						}
+					}
+				})
+			}
+		}
+		if !changed {
+			break
 		}
 	}
 
