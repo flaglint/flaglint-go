@@ -311,128 +311,199 @@ func resolveChainType(expr ast.Expr, declared, structFieldTypes map[string]strin
 	}
 }
 
-// collectScopedBindings returns a copy of base extended with every *local
-// variable* client binding established anywhere within scope (typically
-// one top-level function or method body) — struct-field bindings are
-// intentionally not tracked here; see collectFieldBindings. A fresh copy is
-// returned per top-level function/closure so that a same-named local
-// variable bound to an unrelated value in a *different* function is never
-// mistaken for this scope's client — the flat, whole-file binding table
-// this replaced had exactly that false-positive risk. Nested closures
-// (ast.Inspect descends into FuncLit automatically) correctly continue to
-// see their enclosing function's bindings, because they are walked as part
-// of the same scope.
+// opensScope reports whether n introduces a new Go lexical scope for
+// local-variable purposes: a block body, or a switch/select case's own
+// statement list — the latter is lexically its own scope too, even though
+// (unlike a plain `{ }` block) it isn't wrapped in its own *ast.BlockStmt
+// in the AST.
 //
-// Interface satisfaction (a value only known through an interface type,
-// not a concrete client-typed variable) remains a known Phase 1 gap,
-// deferred to the opt-in --strict-types pass (ADR 002). Indirection through
-// a factory *function* is handled here via ctx.factoryFunctions — see
-// factory.go for why this specific sub-case doesn't need go/types.
-//
-// Known Phase 1 limitation: this map is flat across the whole function, not
-// block-scoped. A deliberate re-`:=` of the same name inside a nested block
-// (e.g. a for-loop shadowing an outer real client variable with an
-// unrelated value) is not modeled — the outer binding remains visible to
-// the inner block. This is a narrower risk than the cross-function case
-// this function was introduced to fix: it requires the same identifier to
-// be deliberately reused for something unrelated within one function, a
-// pattern most Go style guides (and `go vet -shadow`) already discourage.
-// Full block scoping is deferred rather than risk destabilizing this fix
-// under time pressure; tracked for a future pass if it proves necessary.
-func collectScopedBindings(scope ast.Node, base map[string]string, ctx fileContext) map[string]string {
-	bindings := make(map[string]string, len(base))
-	for k, v := range base {
-		bindings[k] = v
+// Not handled: the Init clause of an if/for/switch statement is lexically
+// its own (wider) scope enclosing the whole statement, one level outside
+// its Body block — treating the Body's *ast.BlockStmt as the only scope
+// boundary means an Init-declared variable (`if x := f(); ... `) is
+// attributed to the enclosing scope instead of its own slightly narrower
+// one. This narrower inaccuracy is unrelated to the shadowing bug
+// opensScope/walkScoped were introduced to fix (see walkScoped) and is
+// accepted rather than adding further scope-tracking complexity for it.
+func opensScope(n ast.Node) bool {
+	switch n.(type) {
+	case *ast.BlockStmt, *ast.CaseClause, *ast.CommClause:
+		return true
+	default:
+		return false
 	}
+}
+
+// resolveAssignedBinding reports what a single assignment-target position
+// should resolve to: the SDK version, if rhs is a recognized constructor
+// or factory call, or ok=false for anything else — including a value we
+// simply don't recognize. Callers that track scope (see walkScoped) must
+// treat ok=false as "actively clear any inherited binding for this name",
+// not just "don't add one" — see walkScoped's doc comment for why.
+func resolveAssignedBinding(rhs ast.Expr, ctx fileContext) (version string, ok bool) {
+	call, ok := rhs.(*ast.CallExpr)
+	if !ok {
+		return "", false
+	}
+	version, ok = isSDKConstructorCall(call, ctx.imports)
+	if ok {
+		return version, true
+	}
+	return isFactoryCall(call, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions)
+}
+
+// walkScoped walks scope (a function/method/closure body) depth-first in
+// source order, maintaining a stack of block-scoped local-variable
+// bindings that models real Go lexical scoping — a binding established
+// via `:=` or `var` inside a nested block (or switch/select case) is
+// visible to that block and anything nested deeper within it, but is
+// never visible again once the block ends. visit is invoked at every
+// node with the bindings map currently in effect at that exact point; the
+// map instance is swapped out whenever a new scope opens (a copy-on-write
+// clone of the parent's bindings), so visit must not cache a reference to
+// it across calls. Struct-field bindings are intentionally not tracked
+// here; see collectFieldBindings. Interface satisfaction (a value only
+// known through an interface type, not a concrete client-typed variable)
+// remains a known Phase 1 gap, deferred to the opt-in --strict-types pass
+// (ADR 002).
+//
+// This function (and its caller, invoked once per top-level function or
+// closure via collectFuncScopes) is what keeps a same-named local variable
+// bound to an unrelated value in a *different* function from being
+// mistaken for this scope's client — the flat, whole-file binding table
+// this design replaced had exactly that false-positive risk.
+//
+// Fixes flaglint-go issue #5: a deliberate re-`:=` of the same name inside
+// a nested block, shadowing an outer real client variable with an
+// unrelated value, was previously invisible to this scanner — the outer
+// binding remained visible to the inner block because bindings were once
+// tracked in one flat map for the whole function. Getting this right
+// requires more than scoping the *map* by block: a `:=`/`var` whose value
+// isn't a recognized client must actively clear any same-named binding
+// inherited from an enclosing scope (resolveAssignedBinding's ok=false
+// case), not just fail to add a new one — otherwise the shadow would
+// still resolve to the outer (wrong) binding via inheritance.
+func walkScoped(scope ast.Node, base map[string]string, ctx fileContext, visit func(n ast.Node, bindings map[string]string)) {
+	stack := []map[string]string{base}
+	var pushed []bool // parallel stack: did entering this node open a new scope
 
 	ast.Inspect(scope, func(n ast.Node) bool {
+		if n == nil {
+			// Post-order signal (see ast.Inspect's doc: f(nil) is called
+			// once a node's entire subtree has been visited) — pop the
+			// frame most recently pushed by the matching pre-order visit.
+			last := pushed[len(pushed)-1]
+			pushed = pushed[:len(pushed)-1]
+			if last {
+				stack = stack[:len(stack)-1]
+			}
+			return true
+		}
+
+		opened := opensScope(n)
+		if opened {
+			top := stack[len(stack)-1]
+			child := make(map[string]string, len(top))
+			for k, v := range top {
+				child[k] = v
+			}
+			stack = append(stack, child)
+		}
+		pushed = append(pushed, opened)
+
+		current := stack[len(stack)-1]
 		switch node := n.(type) {
 		case *ast.AssignStmt:
-			for i, rhs := range node.Rhs {
-				call, ok := rhs.(*ast.CallExpr)
-				if !ok {
+			for i, lhs := range node.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || ident.Name == "_" {
 					continue
 				}
-				version, ok := isSDKConstructorCall(call, ctx.imports)
-				if !ok {
-					version, ok = isFactoryCall(call, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions)
-				}
-				if !ok || i >= len(node.Lhs) {
+				if i >= len(node.Rhs) {
+					// Multi-value RHS assigned across more LHS targets
+					// than there are RHS expressions (`x, err := f()`) —
+					// not resolvable syntactically; leave any existing
+					// binding alone rather than guess. Pre-existing
+					// limitation, not introduced by this scope tracking.
 					continue
 				}
-				// Only plain identifiers here — struct-field assignments
-				// are handled file-wide by collectFieldBindings, not
-				// scoped to this function.
-				if ident, ok := node.Lhs[i].(*ast.Ident); ok && ident.Name != "_" {
-					bindings[ident.Name] = version
+				if version, ok := resolveAssignedBinding(node.Rhs[i], ctx); ok {
+					current[ident.Name] = version
+				} else {
+					delete(current, ident.Name)
 				}
 			}
 		case *ast.ValueSpec:
-			bindFromValueSpecOrFactoryCall(node, ctx, bindings)
+			for i, name := range node.Names {
+				if name.Name == "_" {
+					continue
+				}
+				if i >= len(node.Values) {
+					// `var x, y T` with no initializer at all — still a
+					// fresh local declaration that shadows any outer
+					// same-named variable.
+					delete(current, name.Name)
+					continue
+				}
+				if version, ok := resolveAssignedBinding(node.Values[i], ctx); ok {
+					current[name.Name] = version
+				} else {
+					delete(current, name.Name)
+				}
+			}
 		}
+
+		visit(n, current)
 		return true
 	})
-
-	return bindings
 }
 
-// collectCompositeLiteralFieldBindings finds struct-field bindings
-// established via composite literal — `&LDIntegration{ldClient: ldClient}`
-// or `LDIntegration{ldClient: ldClient}` — where the field value is either
-// a direct SDK constructor call or an identifier already known to be bound
-// (via knownBindings, which the caller builds from package-level vars,
-// direct field assignments, and this scope's own local variables). Found
-// missing during field-testing against real-world code (weaviate,
-// e2b-dev/infra both use this exact pattern to store a client into a
-// wrapper struct) — collectFieldBindings only recognized `x.Field = value`
-// assignment, not literal initialization.
+// compositeLiteralFieldBindings finds struct-field bindings established by
+// a single composite literal — `&LDIntegration{ldClient: ldClient}` or
+// `LDIntegration{ldClient: ldClient}` — where the field value is either a
+// direct SDK constructor call or an identifier already known to be bound
+// (via knownBindings, the scope-correct bindings in effect at lit's
+// position — see walkScoped). Found missing during field-testing against
+// real-world code (weaviate, e2b-dev/infra both use this exact pattern to
+// store a client into a wrapper struct) — collectFieldBindings only
+// recognized `x.Field = value` assignment, not literal initialization.
 //
 // Keys are type-qualified ("LDIntegration.ldClient"), matching
 // collectFieldBindings, for the same cross-type-collision reason.
-func collectCompositeLiteralFieldBindings(scope ast.Node, knownBindings map[string]string, ctx fileContext) map[string]string {
+func compositeLiteralFieldBindings(lit *ast.CompositeLit, knownBindings map[string]string, ctx fileContext) map[string]string {
 	bindings := map[string]string{}
-	ast.Inspect(scope, func(n ast.Node) bool {
-		lit, ok := n.(*ast.CompositeLit)
+	typeName := simpleTypeName(lit.Type)
+	if typeName == "" {
+		return bindings
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
 		if !ok {
-			return true
+			continue
 		}
-		typeName := simpleTypeName(lit.Type)
-		if typeName == "" {
-			return true
+		fieldIdent, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
 		}
-		for _, elt := range lit.Elts {
-			kv, ok := elt.(*ast.KeyValueExpr)
+		var version string
+		switch v := unparen(kv.Value).(type) {
+		case *ast.CallExpr:
+			ver, ok := resolveAssignedBinding(v, ctx)
 			if !ok {
 				continue
 			}
-			fieldIdent, ok := kv.Key.(*ast.Ident)
+			version = ver
+		case *ast.Ident:
+			ver, ok := knownBindings[v.Name]
 			if !ok {
 				continue
 			}
-			var version string
-			switch v := unparen(kv.Value).(type) {
-			case *ast.CallExpr:
-				ver, ok := isSDKConstructorCall(v, ctx.imports)
-				if !ok {
-					ver, ok = isFactoryCall(v, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions)
-				}
-				if !ok {
-					continue
-				}
-				version = ver
-			case *ast.Ident:
-				ver, ok := knownBindings[v.Name]
-				if !ok {
-					continue
-				}
-				version = ver
-			default:
-				continue
-			}
-			bindings[typeName+"."+fieldIdent.Name] = version
+			version = ver
+		default:
+			continue
 		}
-		return true
-	})
+		bindings[typeName+"."+fieldIdent.Name] = version
+	}
 	return bindings
 }
 
@@ -452,22 +523,17 @@ func mergeBindings(a, b map[string]string) map[string]string {
 }
 
 // bindFromValueSpecOrFactoryCall handles both `var x = ld.MakeClient(...)`
-// and `var x = pkg.SomeFactoryFunc(...)` forms for a single ValueSpec (used
-// for both package-level `var` and local `var` inside a function body).
+// and `var x = pkg.SomeFactoryFunc(...)` forms for a single package-level
+// ValueSpec. Unlike walkScoped's scope-aware ValueSpec handling, this never
+// clears an existing entry for a name it doesn't recognize — package-level
+// bindings aren't tracked per-scope in the first place, so there's nothing
+// to unshadow.
 func bindFromValueSpecOrFactoryCall(vs *ast.ValueSpec, ctx fileContext, bindings map[string]string) {
 	for i, rhs := range vs.Values {
-		call, ok := rhs.(*ast.CallExpr)
-		if !ok {
+		if i >= len(vs.Names) || vs.Names[i].Name == "_" {
 			continue
 		}
-		version, ok := isSDKConstructorCall(call, ctx.imports)
-		if !ok {
-			version, ok = isFactoryCall(call, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions)
-		}
-		if !ok || i >= len(vs.Names) {
-			continue
-		}
-		if vs.Names[i].Name != "_" {
+		if version, ok := resolveAssignedBinding(rhs, ctx); ok {
 			bindings[vs.Names[i].Name] = version
 		}
 	}
