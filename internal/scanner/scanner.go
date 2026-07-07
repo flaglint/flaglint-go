@@ -84,7 +84,7 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 		})
 	}
 
-	allUsages := runWholeScanAnalysis(fset, absRoot, parsed)
+	allUsages := runWholeScanAnalysis(fset, parsed)
 
 	return types.ScanResult{
 		ScannedAt:      time.Now().UTC().Format(time.RFC3339),
@@ -107,19 +107,27 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 // client behind a struct field, a factory/getter function, or a
 // multi-level field chain declared in a different file (sometimes a
 // different package) than where it's used.
-func runWholeScanAnalysis(fset *token.FileSet, absRoot string, parsed []parsedFile) []types.FlagUsage {
-	modulePath, moduleRoot, hasModule := findModule(absRoot)
-
+func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.FlagUsage {
 	// Pre-pass 1: package identity. ownPkgKey identifies each file's own
 	// package (for same-package bare factory calls); importPathToPkgKey and
 	// importPathToPkgName let OTHER files resolve a qualified
 	// `pkgAlias.FuncName()` call back to one of our own scanned packages
 	// (see factory.go) — never a name-based guess, only real import-path
 	// matching when a go.mod is present.
+	//
+	// findModule is resolved per-file (from pf.dir, not absRoot), not once
+	// for the whole scan — this is what correctly handles a monorepo with
+	// independent nested go.mod submodules (issue #17): a file under a
+	// submodule resolves against that submodule's own go.mod, not
+	// whichever one happens to be nearest the scan root. moduleCache
+	// memoizes the search so files sharing the same nearest go.mod (the
+	// common case) don't each re-walk the filesystem.
+	moduleCache := map[string]moduleInfo{}
 	ownPkgKey := make(map[*ast.File]string, len(parsed))
 	importPathToPkgKey := map[string]string{}
 	importPathToPkgName := map[string]string{}
 	for _, pf := range parsed {
+		modulePath, moduleRoot, hasModule := findModule(pf.dir, moduleCache)
 		key := pkgKeyFor(pf.dir, modulePath, moduleRoot, hasModule)
 		ownPkgKey[pf.file] = key
 		if !hasModule {
