@@ -71,6 +71,57 @@ func TestScanStrict_positiveInterfaceSatisfaction(t *testing.T) {
 	}
 }
 
+func TestScanStrict_positiveTransitiveFactoryWrapping(t *testing.T) {
+	// Issue #16's exact repro: a cross-package factory function
+	// (wrapper.NewClientWrapper) whose declared return type isn't
+	// *ld.LDClient directly but a wrapper struct with a client field,
+	// called from a different package than the one that constructs it.
+	// Turns out this needed no new resolution logic at all — found while
+	// building this regression test, not before: resolveByStaticType
+	// (identity.go, added for issue #15's interface-satisfaction fix)
+	// checks *any* expression's real static type against the SDK client
+	// type, not just an assignment's RHS — so `w.Inner` in
+	// `w.Inner.BoolVariation(...)` resolves correctly as a byproduct,
+	// since go/types reports a field selector's type exactly like any
+	// other expression's, regardless of how the struct it's read from was
+	// itself constructed.
+	dir := "testdata/strict/transitive_factory"
+	cfg := config.Config{
+		Include:  []string{"**/*.go"},
+		Exclude:  []string{"**/vendor/**", "**/.git/**"},
+		Provider: "launchdarkly",
+	}
+
+	phase1, err := Scan(dir, cfg)
+	if err != nil {
+		t.Fatalf("Scan error = %v", err)
+	}
+	if len(phase1.Usages) != 0 {
+		t.Fatalf("Scan (Phase 1) found %d usage(s), want 0 — transitive factory wrapping is exactly what Phase 1 cannot see: %+v", len(phase1.Usages), phase1.Usages)
+	}
+
+	strict, err := ScanStrict(dir, cfg)
+	if err != nil {
+		t.Fatalf("ScanStrict error = %v", err)
+	}
+	if len(strict.Warnings) != 0 {
+		t.Fatalf("ScanStrict warnings = %+v, want none — the fixture module builds cleanly", strict.Warnings)
+	}
+	if len(strict.Usages) != 1 {
+		t.Fatalf("ScanStrict found %d usage(s), want 1: %+v", len(strict.Usages), strict.Usages)
+	}
+	got := strict.Usages[0]
+	if got.FlagKey != "transitive-factory-flag" {
+		t.Errorf("usages[0].FlagKey = %q, want transitive-factory-flag", got.FlagKey)
+	}
+	if got.DetectedBy != "strict-types" {
+		t.Errorf("usages[0].DetectedBy = %q, want strict-types", got.DetectedBy)
+	}
+	if got.SDK != "go-server-sdk-v7" {
+		t.Errorf("usages[0].SDK = %q, want go-server-sdk-v7", got.SDK)
+	}
+}
+
 func TestScanStrict_failedLoadFallsBackToPhase1(t *testing.T) {
 	// A directory with no go.mod at all (or above it) fails to load as a
 	// module — ScanStrict must still return Phase 1's result plus a
