@@ -53,7 +53,11 @@ func Load(dir string) ([]*packages.Package, []LoadFailure, error) {
 	// invocation — not a pattern to repeat somewhere with concurrent
 	// unrelated callers.
 	if updated, changed := withGotypesalias(os.Getenv("GODEBUG")); changed {
-		os.Setenv("GODEBUG", updated)
+		// Setenv on a literal, well-formed key like "GODEBUG" can only
+		// fail for a key containing "=" or a NUL byte — never true here —
+		// so there's nothing meaningful to do with an error even if one
+		// somehow occurred.
+		_ = os.Setenv("GODEBUG", updated)
 	}
 
 	cfg := &packages.Config{
