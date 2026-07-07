@@ -21,3 +21,17 @@ func NewClientWrapper() *ClientWrapper {
 	client, _ := ld.MakeClient("sdk-key", 5*time.Second)
 	return &ClientWrapper{Inner: client}
 }
+
+// OuterWrapper adds a second hop (Middle.Inner, not just Inner) — proving
+// resolveByStaticType's go/types.Info.TypeOf(rhs) generalizes to an
+// arbitrarily deep field-selector chain for free, since it queries the
+// expression's real type directly rather than manually walking one hop at
+// a time the way Phase 1's syntax-only structFieldTypes chain resolution
+// does.
+type OuterWrapper struct {
+	Middle *ClientWrapper
+}
+
+func NewOuterWrapper() *OuterWrapper {
+	return &OuterWrapper{Middle: NewClientWrapper()}
+}

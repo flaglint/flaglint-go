@@ -107,18 +107,32 @@ func TestScanStrict_positiveTransitiveFactoryWrapping(t *testing.T) {
 	if len(strict.Warnings) != 0 {
 		t.Fatalf("ScanStrict warnings = %+v, want none — the fixture module builds cleanly", strict.Warnings)
 	}
-	if len(strict.Usages) != 1 {
-		t.Fatalf("ScanStrict found %d usage(s), want 1: %+v", len(strict.Usages), strict.Usages)
+	// 2: the one-hop repro (w.Inner.BoolVariation) and a two-hop variant
+	// (o.Middle.Inner.BoolVariation) — proving resolveByStaticType
+	// generalizes past a single field-selector hop for free, since it
+	// queries go/types for the whole expression's real type directly
+	// rather than manually walking one hop at a time.
+	if len(strict.Usages) != 2 {
+		t.Fatalf("ScanStrict found %d usage(s), want 2: %+v", len(strict.Usages), strict.Usages)
 	}
-	got := strict.Usages[0]
-	if got.FlagKey != "transitive-factory-flag" {
-		t.Errorf("usages[0].FlagKey = %q, want transitive-factory-flag", got.FlagKey)
+	wantFlagKeys := map[string]bool{"transitive-factory-flag": false, "two-hop-transitive-factory-flag": false}
+	for _, got := range strict.Usages {
+		if _, ok := wantFlagKeys[got.FlagKey]; !ok {
+			t.Errorf("unexpected usage %+v", got)
+			continue
+		}
+		wantFlagKeys[got.FlagKey] = true
+		if got.DetectedBy != "strict-types" {
+			t.Errorf("usage %q DetectedBy = %q, want strict-types", got.FlagKey, got.DetectedBy)
+		}
+		if got.SDK != "go-server-sdk-v7" {
+			t.Errorf("usage %q SDK = %q, want go-server-sdk-v7", got.FlagKey, got.SDK)
+		}
 	}
-	if got.DetectedBy != "strict-types" {
-		t.Errorf("usages[0].DetectedBy = %q, want strict-types", got.DetectedBy)
-	}
-	if got.SDK != "go-server-sdk-v7" {
-		t.Errorf("usages[0].SDK = %q, want go-server-sdk-v7", got.SDK)
+	for k, found := range wantFlagKeys {
+		if !found {
+			t.Errorf("missing expected usage for flag key %q", k)
+		}
 	}
 }
 

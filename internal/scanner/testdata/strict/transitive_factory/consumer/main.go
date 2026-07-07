@@ -14,6 +14,14 @@ func run() {
 	_, _ = w.Inner.BoolVariation("transitive-factory-flag", nil, false)
 }
 
+// runTwoHop proves the resolution generalizes past a single field-selector
+// hop — o.Middle.Inner, not just w.Inner.
+func runTwoHop() {
+	o := wrapper.NewOuterWrapper()
+	_, _ = o.Middle.Inner.BoolVariation("two-hop-transitive-factory-flag", nil, false)
+}
+
 func main() {
 	run()
+	runTwoHop()
 }
