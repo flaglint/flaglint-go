@@ -236,7 +236,7 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 			ctx := ctxs[pf.file]
 			pkg := pkgBindings(base, ctx.ownPkgKey)
 			for _, s := range fileScopes[pf.file] {
-				walkScoped(s.body, mergeBindings(pkg, s.paramBindings), ctx, func(n ast.Node, current map[string]string) {
+				walkScoped(s.body, mergeBindings(pkg, s.paramBindings), ctx, func(n ast.Node, current map[string]string, _ map[string]methodValueBinding) {
 					lit, ok := n.(*ast.CompositeLit)
 					if !ok {
 						return
@@ -357,54 +357,72 @@ type fileDetector struct {
 	usages       []types.FlagUsage
 }
 
-// Known Phase 1 gap: a method value taken from a bound client
-// (`f := client.BoolVariation; f(...)`) is not detected — detection
-// requires the method to be called directly through a selector expression
-// at the call site itself. This is the same class of indirection ADR 002
-// already defers to the opt-in --strict-types pass, not a new exception.
-//
 // bindings is the scope's initial bindings (whole-scan package bindings
 // merged with this scope's own parameter bindings) — walkScoped resolves
 // the block-scoped view in effect at each call site from there, so a
 // shadowed local variable is never mistaken for this scope's client. See
 // walkScoped's doc comment (identity.go) for why that requires more than
 // just scoping the map by block.
+//
+// Known Phase 1 gap: a method value passed *across a function boundary*
+// (captured in one function, called from inside a different one it was
+// passed into — the shape a real e2b-dev/infra field-testing repro
+// actually needed) is not detected; only a method value used within the
+// same scope it was captured in is (see methodValueBinding, issue #6).
+// Interprocedural propagation is a meaningfully larger undertaking,
+// deferred to the opt-in --strict-types pass, not a new exception to the
+// identity model.
 func (d *fileDetector) detect(scope ast.Node, bindings, declared, structFieldTypes map[string]string, ctx fileContext) {
-	walkScoped(scope, bindings, ctx, func(n ast.Node, current map[string]string) {
+	walkScoped(scope, bindings, ctx, func(n ast.Node, current map[string]string, methodValues map[string]methodValueBinding) {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return
 		}
-		sel, ok := unparen(call.Fun).(*ast.SelectorExpr)
-		if !ok {
-			return
-		}
 
-		// A chained call — `pkg.GetLdClient().Method(...)`, no
-		// intermediate variable (issue #20) — has the receiver's version
-		// known directly from the inner call itself; resolveAssignedBinding
-		// already does exactly this "is this a recognized constructor/
-		// factory call" check for assignment RHS values, and applies here
-		// unchanged. Only fall back to the bindings-map lookup when the
-		// receiver isn't itself such a call.
-		version, bound := resolveAssignedBinding(unparen(sel.X), ctx)
-		if !bound {
-			receiver := resolveReceiver(sel.X, declared, structFieldTypes)
-			if receiver == "" {
-				return
+		var version, callTypeName string
+		switch fn := unparen(call.Fun).(type) {
+		case *ast.SelectorExpr:
+			// A chained call — `pkg.GetLdClient().Method(...)`, no
+			// intermediate variable (issue #20) — has the receiver's
+			// version known directly from the inner call itself;
+			// resolveAssignedBinding already does exactly this "is this a
+			// recognized constructor/factory call" check for assignment
+			// RHS values, and applies here unchanged. Only fall back to
+			// the bindings-map lookup when the receiver isn't itself such
+			// a call.
+			v, bound := resolveAssignedBinding(unparen(fn.X), ctx)
+			if !bound {
+				receiver := resolveReceiver(fn.X, declared, structFieldTypes)
+				if receiver == "" {
+					return
+				}
+				v, bound = current[receiver]
+				if !bound {
+					return
+				}
 			}
-			version, bound = current[receiver]
+			version, callTypeName = v, fn.Sel.Name
+		case *ast.Ident:
+			// A bare call on a method value captured earlier in this same
+			// scope (`f := client.BoolVariation; f(...)`, issue #6) — the
+			// version and method name are already known from the capture
+			// itself, resolved by walkScoped's bindLocalValue.
+			mv, bound := methodValues[fn.Name]
 			if !bound {
 				return
 			}
+			version, callTypeName = mv.version, mv.method
+		default:
+			return
 		}
-		spec, known := methodSpecs[sel.Sel.Name]
+
+		spec, known := methodSpecs[callTypeName]
 		if !known {
 			return
 		}
 
 		pos := d.fset.Position(call.Pos())
-		callType := types.CallType(sel.Sel.Name)
+		callType := types.CallType(callTypeName)
 		sdk := sdkName(version)
 
 		if spec.keyArgIndex == -1 {

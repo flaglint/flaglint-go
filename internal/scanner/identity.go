@@ -352,18 +352,91 @@ func resolveAssignedBinding(rhs ast.Expr, ctx fileContext) (version string, ok b
 	return isFactoryCall(call, ctx.ownPkgKey, ctx.importAliases, ctx.factoryFunctions)
 }
 
+// methodValueBinding records that an identifier was bound to a specific
+// method *value* taken from an already-proven client (`f :=
+// client.BoolVariation`, no call parens) — as opposed to the client
+// itself. Resolving a later bare call `f(...)` requires remembering both
+// which SDK version the client resolved to and which method name was
+// captured, since neither is otherwise available at the call site (there
+// is no receiver selector to resolve at all).
+type methodValueBinding struct {
+	version string
+	method  string
+}
+
+// scopeBindings is one lexical scope's worth of local bindings: both
+// kinds walkScoped tracks, kept together so a single push/pop always
+// moves them in lockstep (they share the same scoping rules).
+type scopeBindings struct {
+	clients      map[string]string
+	methodValues map[string]methodValueBinding
+}
+
+func (s scopeBindings) clone() scopeBindings {
+	clone := scopeBindings{
+		clients:      make(map[string]string, len(s.clients)),
+		methodValues: make(map[string]methodValueBinding, len(s.methodValues)),
+	}
+	for k, v := range s.clients {
+		clone.clients[k] = v
+	}
+	for k, v := range s.methodValues {
+		clone.methodValues[k] = v
+	}
+	return clone
+}
+
+// bindLocalValue processes one assignment-target position (an identifier
+// name and its RHS expression), updating current's client and
+// method-value bindings for that name:
+//   - binds it as a client if rhs is a recognized constructor/factory call
+//   - binds it as a method value (see methodValueBinding) if rhs is a bare
+//     method-value expression on an already-bound client — `client.
+//     BoolVariation`, no call parens — closing flaglint-go issue #6's
+//     same-scope case (`f := client.BoolVariation; f(...)`). Deliberately
+//     narrow: only a plain identifier receiver is recognized here, not a
+//     struct-field chain (`f := obj.field.BoolVariation`) — matching the
+//     issue's own repro and keeping this fix contained. A method value
+//     passed across a function boundary (the harder case a real-world
+//     e2b-dev/infra repro actually needed) remains a separate, tracked gap
+//     — this only resolves a method value used within the same scope it
+//     was captured in.
+//   - clears any existing binding of *either* kind for that name
+//     otherwise — a fresh declaration must actively unshadow, not just
+//     fail to add a new binding (see walkScoped's doc comment for why).
+func bindLocalValue(name string, rhs ast.Expr, current scopeBindings, ctx fileContext) {
+	if version, ok := resolveAssignedBinding(rhs, ctx); ok {
+		current.clients[name] = version
+		delete(current.methodValues, name)
+		return
+	}
+	if sel, ok := unparen(rhs).(*ast.SelectorExpr); ok {
+		if recvIdent, ok := sel.X.(*ast.Ident); ok {
+			if version, bound := current.clients[recvIdent.Name]; bound {
+				if _, known := methodSpecs[sel.Sel.Name]; known {
+					current.methodValues[name] = methodValueBinding{version: version, method: sel.Sel.Name}
+					delete(current.clients, name)
+					return
+				}
+			}
+		}
+	}
+	delete(current.clients, name)
+	delete(current.methodValues, name)
+}
+
 // walkScoped walks scope (a function/method/closure body) depth-first in
 // source order, maintaining a stack of block-scoped local-variable
 // bindings that models real Go lexical scoping — a binding established
 // via `:=` or `var` inside a nested block (or switch/select case) is
 // visible to that block and anything nested deeper within it, but is
 // never visible again once the block ends. visit is invoked at every
-// node with the bindings map currently in effect at that exact point; the
-// map instance is swapped out whenever a new scope opens (a copy-on-write
-// clone of the parent's bindings), so visit must not cache a reference to
-// it across calls. Struct-field bindings are intentionally not tracked
-// here; see collectFieldBindings. Interface satisfaction (a value only
-// known through an interface type, not a concrete client-typed variable)
+// node with the bindings in effect at that exact point; the underlying
+// maps are swapped out whenever a new scope opens (a copy-on-write clone
+// of the parent's bindings), so visit must not cache a reference to them
+// across calls. Struct-field bindings are intentionally not tracked here;
+// see collectFieldBindings. Interface satisfaction (a value only known
+// through an interface type, not a concrete client-typed variable)
 // remains a known Phase 1 gap, deferred to the opt-in --strict-types pass
 // (ADR 002).
 //
@@ -383,8 +456,8 @@ func resolveAssignedBinding(rhs ast.Expr, ctx fileContext) (version string, ok b
 // inherited from an enclosing scope (resolveAssignedBinding's ok=false
 // case), not just fail to add a new one — otherwise the shadow would
 // still resolve to the outer (wrong) binding via inheritance.
-func walkScoped(scope ast.Node, base map[string]string, ctx fileContext, visit func(n ast.Node, bindings map[string]string)) {
-	stack := []map[string]string{base}
+func walkScoped(scope ast.Node, base map[string]string, ctx fileContext, visit func(n ast.Node, bindings map[string]string, methodValues map[string]methodValueBinding)) {
+	stack := []scopeBindings{{clients: base, methodValues: map[string]methodValueBinding{}}}
 	var pushed []bool // parallel stack: did entering this node open a new scope
 
 	ast.Inspect(scope, func(n ast.Node) bool {
@@ -402,12 +475,7 @@ func walkScoped(scope ast.Node, base map[string]string, ctx fileContext, visit f
 
 		opened := opensScope(n)
 		if opened {
-			top := stack[len(stack)-1]
-			child := make(map[string]string, len(top))
-			for k, v := range top {
-				child[k] = v
-			}
-			stack = append(stack, child)
+			stack = append(stack, stack[len(stack)-1].clone())
 		}
 		pushed = append(pushed, opened)
 
@@ -427,11 +495,7 @@ func walkScoped(scope ast.Node, base map[string]string, ctx fileContext, visit f
 					// limitation, not introduced by this scope tracking.
 					continue
 				}
-				if version, ok := resolveAssignedBinding(node.Rhs[i], ctx); ok {
-					current[ident.Name] = version
-				} else {
-					delete(current, ident.Name)
-				}
+				bindLocalValue(ident.Name, node.Rhs[i], current, ctx)
 			}
 		case *ast.ValueSpec:
 			for i, name := range node.Names {
@@ -442,18 +506,15 @@ func walkScoped(scope ast.Node, base map[string]string, ctx fileContext, visit f
 					// `var x, y T` with no initializer at all — still a
 					// fresh local declaration that shadows any outer
 					// same-named variable.
-					delete(current, name.Name)
+					delete(current.clients, name.Name)
+					delete(current.methodValues, name.Name)
 					continue
 				}
-				if version, ok := resolveAssignedBinding(node.Values[i], ctx); ok {
-					current[name.Name] = version
-				} else {
-					delete(current, name.Name)
-				}
+				bindLocalValue(name.Name, node.Values[i], current, ctx)
 			}
 		}
 
-		visit(n, current)
+		visit(n, current.clients, current.methodValues)
 		return true
 	})
 }
