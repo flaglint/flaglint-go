@@ -65,6 +65,11 @@ brew install flaglint/tap/flaglint-go
 flaglint-go scan ./services
 flaglint-go scan ./services --format json
 
+# --strict-types: additionally resolves findings only provable with real
+# go/types information (interface satisfaction) — requires the module to
+# build; see docs/adr/005-strict-types-pass.md
+flaglint-go scan ./services --strict-types
+
 # Inventory + migration-readiness score
 flaglint-go audit ./services
 flaglint-go audit ./services --write-baseline .flaglint-baseline.json

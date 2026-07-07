@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	gotypes "go/types"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,6 +33,12 @@ type parsedFile struct {
 	dir     string
 	file    *ast.File
 	imports sdkImports
+
+	// typesInfo is real go/types information for this file's package, only
+	// populated by ScanStrict (strict.go) — nil for an ordinary Scan. See
+	// fileContext.typesInfo (identity.go) and docs/adr/005-strict-types-
+	// pass.md.
+	typesInfo *gotypes.Info
 }
 
 // Scan walks root for files matching cfg's include/exclude patterns, parses
@@ -181,6 +188,7 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 			importAliases:    resolveImportAliases(pf.file, importPathToPkgKey, importPathToPkgName),
 			factoryFunctions: factoryFunctions,
 			structFieldTypes: pkgBindings(structFieldTypesByPkg, ownPkgKey[pf.file]),
+			typesInfo:        pf.typesInfo,
 		}
 	}
 
