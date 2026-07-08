@@ -114,7 +114,7 @@ func checkBaseline(cmd *cobra.Command, result types.ScanResult, baselinePath str
 			fingerprints = append(fingerprints, u.Fingerprint)
 		}
 	}
-	newFindings := baseline.New(fingerprints, known)
+	newFindings := baseline.New(baseline.CountFingerprints(fingerprints), known)
 
 	if !failOnNew {
 		if len(newFindings) > 0 {
