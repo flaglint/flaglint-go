@@ -80,6 +80,64 @@ type ScanWarning struct {
 	Reason string `json:"reason,omitempty"` // human-readable cause — only set for "typecheck-failure"
 }
 
+// MigrationValueType is the OpenFeature evaluation-method category a call's
+// return value maps to — which getXxxValue method a future migrate command
+// would rewrite the call to use. Unlike flaglint-js (whose generic
+// variation()/isFeatureEnabled() calls require inferring this from the
+// fallback argument's literal type), every Go SDK method name is already
+// type-specific, so this is always derived directly from CallType, never
+// from a fallback expression.
+type MigrationValueType string
+
+const (
+	MigrationValueBoolean MigrationValueType = "boolean"
+	MigrationValueString  MigrationValueType = "string"
+	MigrationValueNumber  MigrationValueType = "number"
+	MigrationValueObject  MigrationValueType = "object"
+	MigrationValueUnknown MigrationValueType = "unknown"
+)
+
+// MigrationManualReviewReason is why a call site isn't safely automatable by
+// a future migrate command. Matches flaglint-js's set exactly (see ADR 003);
+// "unknown-fallback" is never produced by flaglint-go itself (Go's method
+// names always determine ValueType outright, see MigrationValueType) but is
+// kept for cross-tool consistency — the same reason vocabulary either tool's
+// migrationInventory can carry.
+type MigrationManualReviewReason string
+
+const (
+	MigrationReasonDynamicKey        MigrationManualReviewReason = "dynamic-key"
+	MigrationReasonUnknownFallback   MigrationManualReviewReason = "unknown-fallback"
+	MigrationReasonDetailMethod      MigrationManualReviewReason = "detail-method"
+	MigrationReasonBulkInventoryCall MigrationManualReviewReason = "bulk-inventory-call"
+)
+
+// MigrationInventoryItem is a richer, migration-focused record of one call
+// site than FlagUsage — the additional detail a future `migrate` command
+// would need to safely rewrite the call, not just report it. Mirrors
+// flaglint-js's MigrationInventoryItem field-for-field (see ADR 003), with
+// one deliberate omission: flaglint-js's `isAwaited?: boolean` has no Go
+// equivalent (no async/await) and is never emitted.
+type MigrationInventoryItem struct {
+	File               string   `json:"file"`
+	Line               int      `json:"line"`
+	Column             int      `json:"column"`
+	LaunchDarklyMethod CallType `json:"launchDarklyMethod"`
+	CallExpression     string   `json:"callExpression,omitempty"`
+	RangeStart         int      `json:"rangeStart,omitempty"`
+	RangeEnd           int      `json:"rangeEnd,omitempty"`
+	FlagKeyExpression  string   `json:"flagKeyExpression,omitempty"`
+	// StaticFlagKey is only set when !IsDynamic — matches flaglint-js's
+	// `staticFlagKey?: string`.
+	StaticFlagKey               string                      `json:"staticFlagKey,omitempty"`
+	IsDynamic                   bool                        `json:"isDynamic"`
+	ValueType                   MigrationValueType          `json:"valueType"`
+	FallbackExpression          string                      `json:"fallbackExpression,omitempty"`
+	EvaluationContextExpression string                      `json:"evaluationContextExpression,omitempty"`
+	SafelyAutomatable           bool                        `json:"safelyAutomatable"`
+	ManualReviewReason          MigrationManualReviewReason `json:"manualReviewReason,omitempty"`
+}
+
 // ScanResult is the top-level output of a scan, shared by audit/scan/validate.
 type ScanResult struct {
 	ScannedAt      string        `json:"scannedAt"`
@@ -90,4 +148,13 @@ type ScanResult struct {
 	Usages         []FlagUsage   `json:"usages"`
 	ScanDurationMs int64         `json:"scanDurationMs"`
 	Warnings       []ScanWarning `json:"warnings"`
+	// MigrationInventory carries a MigrationInventoryItem for every Phase 1
+	// (pure-syntax) usage — see docs/adr/003-cross-tool-contract.md. A
+	// --strict-types-only usage (FlagUsage.DetectedBy == "strict-types",
+	// e.g. a forwarding-function call) is deliberately excluded: its call
+	// site doesn't directly show the LD method's own (key, context,
+	// fallback) arguments the way a migrate rewrite would need, so a
+	// MigrationInventoryItem for it would misrepresent what's actually safe
+	// to rewrite.
+	MigrationInventory []MigrationInventoryItem `json:"migrationInventory"`
 }

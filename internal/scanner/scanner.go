@@ -34,6 +34,13 @@ type parsedFile struct {
 	file    *ast.File
 	imports sdkImports
 
+	// src is this file's raw source bytes, kept alongside its already-
+	// parsed AST so migrationInventory (migration.go) can extract each
+	// call/argument's exact source text — go/parser discards the original
+	// text once parsing succeeds, so this has to be retained separately if
+	// anything downstream needs it.
+	src []byte
+
 	// typesInfo is real go/types information for this file's package, only
 	// populated by ScanStrict (strict.go) — nil for an ordinary Scan. See
 	// fileContext.typesInfo (identity.go) and docs/adr/005-strict-types-
@@ -87,21 +94,23 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 			relPath: rel,
 			dir:     filepath.Dir(full),
 			file:    file,
+			src:     src,
 			imports: traceSDKImports(file),
 		})
 	}
 
-	allUsages := runWholeScanAnalysis(fset, parsed)
+	allUsages, allMigrationInventory := runWholeScanAnalysis(fset, parsed)
 
 	return types.ScanResult{
-		ScannedAt:      time.Now().UTC().Format(time.RFC3339),
-		ScanRoot:       absRoot,
-		ScannedFiles:   len(relFiles),
-		TotalUsages:    len(allUsages),
-		UniqueFlags:    uniqueFlags(allUsages),
-		Usages:         allUsages,
-		ScanDurationMs: time.Since(start).Milliseconds(),
-		Warnings:       warnings,
+		ScannedAt:          time.Now().UTC().Format(time.RFC3339),
+		ScanRoot:           absRoot,
+		ScannedFiles:       len(relFiles),
+		TotalUsages:        len(allUsages),
+		UniqueFlags:        uniqueFlags(allUsages),
+		Usages:             allUsages,
+		ScanDurationMs:     time.Since(start).Milliseconds(),
+		Warnings:           warnings,
+		MigrationInventory: allMigrationInventory,
 	}, nil
 }
 
@@ -114,7 +123,7 @@ func Scan(root string, cfg config.Config) (types.ScanResult, error) {
 // client behind a struct field, a factory/getter function, or a
 // multi-level field chain declared in a different file (sometimes a
 // different package) than where it's used.
-func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.FlagUsage {
+func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) ([]types.FlagUsage, []types.MigrationInventoryItem) {
 	// Pre-pass 1: package identity. ownPkgKey identifies each file's own
 	// package (for same-package bare factory calls); importPathToPkgKey and
 	// importPathToPkgName let OTHER files resolve a qualified
@@ -305,10 +314,11 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 	// literal in one file/function can make a field binding visible to a
 	// different file processed earlier in this loop.
 	var allUsages []types.FlagUsage
+	var allMigrationInventory []types.MigrationInventoryItem
 	for _, pf := range parsed {
 		ctx := ctxs[pf.file]
 		pkg := pkgBindings(base, ctx.ownPkgKey)
-		d := &fileDetector{fset: fset, relPath: pf.relPath}
+		d := &fileDetector{fset: fset, relPath: pf.relPath, src: pf.src}
 		for _, s := range fileScopes[pf.file] {
 			// packageVarTypes merged in first (mergeBindings's later
 			// argument wins on collision) so a local parameter of the
@@ -318,12 +328,16 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 			d.detect(s.body, mergeBindings(pkg, s.paramBindings), declared, ctx.structFieldTypes, ctx)
 		}
 		allUsages = append(allUsages, d.usages...)
+		allMigrationInventory = append(allMigrationInventory, d.migrationInventory...)
 	}
 
 	if allUsages == nil {
 		allUsages = []types.FlagUsage{}
 	}
-	return allUsages
+	if allMigrationInventory == nil {
+		allMigrationInventory = []types.MigrationInventoryItem{}
+	}
+	return allUsages, allMigrationInventory
 }
 
 // pkgBindings returns byPkg's inner map for pkgKey, creating it on first
@@ -406,6 +420,14 @@ type fileDetector struct {
 	relPath      string
 	dynamicIndex int
 	usages       []types.FlagUsage
+
+	// src is this file's raw source bytes (parsedFile.src), used to build
+	// each usage's corresponding MigrationInventoryItem — see migration.go.
+	// May be nil (e.g. a read failure in strict.go's own re-read for the
+	// --strict-types pass): buildMigrationInventoryItem's exprText calls
+	// degrade safely to missing expression text in that case, never a panic.
+	src                []byte
+	migrationInventory []types.MigrationInventoryItem
 }
 
 // bindings is the scope's initial bindings (whole-scan package bindings
@@ -490,6 +512,7 @@ func (d *fileDetector) detect(scope ast.Node, bindings, declared, structFieldTyp
 				SDK:              sdk,
 				Risk:             spec.risk,
 			})
+			d.migrationInventory = append(d.migrationInventory, buildMigrationInventoryItem(d.fset, d.src, d.relPath, call, spec, callTypeName, pos, "*", false))
 			return
 		}
 
@@ -519,6 +542,7 @@ func (d *fileDetector) detect(scope ast.Node, bindings, declared, structFieldTyp
 			SDK:              sdk,
 			Risk:             riskFor(spec, isDynamic),
 		})
+		d.migrationInventory = append(d.migrationInventory, buildMigrationInventoryItem(d.fset, d.src, d.relPath, call, spec, callTypeName, pos, flagKey, isDynamic))
 	})
 }
 

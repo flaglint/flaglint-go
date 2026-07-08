@@ -3,6 +3,7 @@ package scanner
 import (
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -23,11 +24,25 @@ func parseFixture(t *testing.T, name string) []types.FlagUsage {
 
 func parseFixtures(t *testing.T, names ...string) []types.FlagUsage {
 	t.Helper()
+	usages, _ := parseFixturesWithMigration(t, names...)
+	return usages
+}
+
+// parseFixturesWithMigration is parseFixtures plus the migrationInventory
+// items runWholeScanAnalysis produces alongside usages — its own function
+// (rather than changing parseFixtures' return shape) so every existing
+// call site that only cares about usages stays unchanged.
+func parseFixturesWithMigration(t *testing.T, names ...string) ([]types.FlagUsage, []types.MigrationInventoryItem) {
+	t.Helper()
 	fset := token.NewFileSet()
 	var parsed []parsedFile
 	for _, name := range names {
 		path := filepath.Join("testdata", "fixtures", name)
-		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", name, err)
+		}
+		file, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("ParseFile(%s) error = %v", name, err)
 		}
@@ -39,6 +54,7 @@ func parseFixtures(t *testing.T, names ...string) []types.FlagUsage {
 			relPath: name,
 			dir:     absDir,
 			file:    file,
+			src:     src,
 			imports: traceSDKImports(file),
 		})
 	}
@@ -350,6 +366,96 @@ func TestScanFile_positiveVariety(t *testing.T) {
 	// 5: *Ctx variant — flag key is argument index 1, not 0
 	if got := usages[4]; got.FlagKey != "ctx-flag" || got.IsDynamic || got.CallType != types.CallType("BoolVariationCtx") {
 		t.Errorf("usages[4] = %+v, want ctx-flag (static, from arg index 1)", got)
+	}
+}
+
+func TestScanFile_positiveVarietyMigrationInventory(t *testing.T) {
+	usages, items := parseFixturesWithMigration(t, "positive_variety.go")
+	if len(usages) != 5 || len(items) != 5 {
+		t.Fatalf("got %d usages / %d migration items, want 5/5: %+v / %+v", len(usages), len(items), usages, items)
+	}
+
+	checkRange := func(t *testing.T, item types.MigrationInventoryItem) {
+		t.Helper()
+		if item.RangeStart >= item.RangeEnd {
+			t.Errorf("RangeStart/RangeEnd = %d/%d, want start < end", item.RangeStart, item.RangeEnd)
+		}
+		if item.RangeEnd-item.RangeStart != len(item.CallExpression) {
+			t.Errorf("range length = %d, want len(CallExpression) = %d", item.RangeEnd-item.RangeStart, len(item.CallExpression))
+		}
+	}
+
+	// 1: dynamic identifier key — manual review, dynamic-key.
+	item := items[0]
+	checkRange(t, item)
+	if item.CallExpression != `client.BoolVariation(flagName, nil, false)` {
+		t.Errorf("items[0].CallExpression = %q", item.CallExpression)
+	}
+	if item.FlagKeyExpression != "flagName" || item.StaticFlagKey != "" || !item.IsDynamic {
+		t.Errorf("items[0] key fields = %+v, want dynamic flagName with no static key", item)
+	}
+	if item.EvaluationContextExpression != "nil" || item.FallbackExpression != "false" {
+		t.Errorf("items[0] context/fallback = %+v", item)
+	}
+	if item.ValueType != types.MigrationValueBoolean {
+		t.Errorf("items[0].ValueType = %q, want boolean", item.ValueType)
+	}
+	if item.SafelyAutomatable || item.ManualReviewReason != types.MigrationReasonDynamicKey {
+		t.Errorf("items[0] = %+v, want safelyAutomatable=false, reason=dynamic-key", item)
+	}
+
+	// 2: dynamic fmt.Sprintf key — same reason, string value type.
+	item = items[1]
+	checkRange(t, item)
+	if item.FlagKeyExpression != `fmt.Sprintf("flag-%d", 1)` {
+		t.Errorf("items[1].FlagKeyExpression = %q", item.FlagKeyExpression)
+	}
+	if item.ValueType != types.MigrationValueString {
+		t.Errorf("items[1].ValueType = %q, want string", item.ValueType)
+	}
+	if item.SafelyAutomatable || item.ManualReviewReason != types.MigrationReasonDynamicKey {
+		t.Errorf("items[1] = %+v, want safelyAutomatable=false, reason=dynamic-key", item)
+	}
+
+	// 3: *Detail method — manual review regardless of a static key.
+	item = items[2]
+	checkRange(t, item)
+	if item.StaticFlagKey != "detail-flag" || item.IsDynamic {
+		t.Errorf("items[2] key fields = %+v, want static detail-flag", item)
+	}
+	if item.SafelyAutomatable || item.ManualReviewReason != types.MigrationReasonDetailMethod {
+		t.Errorf("items[2] = %+v, want safelyAutomatable=false, reason=detail-method", item)
+	}
+
+	// 4: bulk call — no flag key at all, evaluation context is args[0].
+	item = items[3]
+	checkRange(t, item)
+	if item.FlagKeyExpression != "" || item.StaticFlagKey != "" || item.IsDynamic {
+		t.Errorf("items[3] key fields = %+v, want no flag key at all", item)
+	}
+	if item.EvaluationContextExpression != "nil" {
+		t.Errorf("items[3].EvaluationContextExpression = %q, want nil (args[0])", item.EvaluationContextExpression)
+	}
+	if item.ValueType != types.MigrationValueUnknown {
+		t.Errorf("items[3].ValueType = %q, want unknown", item.ValueType)
+	}
+	if item.SafelyAutomatable || item.ManualReviewReason != types.MigrationReasonBulkInventoryCall {
+		t.Errorf("items[3] = %+v, want safelyAutomatable=false, reason=bulk-inventory-call", item)
+	}
+
+	// 5: *Ctx variant — key/context/fallback are shifted one position later
+	// (a leading context.Context argument), and this one IS safely
+	// automatable (static key, non-detail, non-bulk, non-dynamic).
+	item = items[4]
+	checkRange(t, item)
+	if item.FlagKeyExpression != `"ctx-flag"` || item.StaticFlagKey != "ctx-flag" || item.IsDynamic {
+		t.Errorf("items[4] key fields = %+v, want static ctx-flag from arg index 1", item)
+	}
+	if item.EvaluationContextExpression != "nil" || item.FallbackExpression != "false" {
+		t.Errorf("items[4] context/fallback = %+v, want args[2]/args[3]", item)
+	}
+	if !item.SafelyAutomatable || item.ManualReviewReason != "" {
+		t.Errorf("items[4] = %+v, want safelyAutomatable=true, no review reason", item)
 	}
 }
 

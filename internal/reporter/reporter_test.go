@@ -89,7 +89,21 @@ func TestRender_unsupportedFormat(t *testing.T) {
 }
 
 func TestRender_json_emptyArraysAreNotNull(t *testing.T) {
-	out, err := Render(types.ScanResult{}, Options{Format: FormatJSON})
+	// Explicit empty (non-nil) slices, matching what Scan() itself actually
+	// produces for a clean scan — NOT a bare types.ScanResult{}, whose
+	// zero-value slice fields are nil by construction and would marshal as
+	// `null` regardless of any tag on these fields; that would make this
+	// test unable to ever catch the real regression it exists to guard
+	// against: an accidentally-added `omitempty` tag on one of these
+	// fields, which turns a non-nil empty slice's `[]` output into total
+	// field omission instead.
+	result := types.ScanResult{
+		UniqueFlags:        []string{},
+		Usages:             []types.FlagUsage{},
+		Warnings:           []types.ScanWarning{},
+		MigrationInventory: []types.MigrationInventoryItem{},
+	}
+	out, err := Render(result, Options{Format: FormatJSON})
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
@@ -97,8 +111,10 @@ func TestRender_json_emptyArraysAreNotNull(t *testing.T) {
 	// decoder would happily turn a `null` array back into an empty slice,
 	// masking the exact bug this guards (nil slices marshaling as `null`
 	// instead of `[]`, which breaks a consumer's `.map()`/`jq` pipeline on
-	// the JSON *text* itself).
-	for _, field := range []string{`"uniqueFlags":null`, `"usages":null`, `"warnings":null`} {
+	// the JSON *text* itself). json.MarshalIndent inserts a space after
+	// the colon, so the check must match that exactly, not compact-JSON
+	// spacing.
+	for _, field := range []string{`"uniqueFlags": null`, `"usages": null`, `"warnings": null`, `"migrationInventory": null`} {
 		if strings.Contains(out, field) {
 			t.Errorf("output contains %q — empty slices must marshal as [], not null, to match flaglint-js's array semantics:\n%s", field, out)
 		}

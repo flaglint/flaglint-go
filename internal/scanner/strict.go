@@ -3,6 +3,7 @@ package scanner
 import (
 	"go/token"
 	gotypes "go/types"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -55,8 +56,12 @@ func ScanStrict(root string, cfg config.Config) (types.ScanResult, error) {
 		})
 	}
 
-	mergeStrictTypesUsages(&result, strictTypesUsages(pkgs, absRoot))
-	mergeStrictTypesUsages(&result, forwardingCallUsages(pkgs, absRoot))
+	strictUsages, strictMigrationItems := strictTypesUsages(pkgs, absRoot)
+	mergeStrictTypesUsages(&result, strictUsages, strictMigrationItems)
+	// forwardingCallUsages' call sites don't directly show the LD method's
+	// own (key, context, fallback) arguments (see MigrationInventory's doc
+	// comment, types.go) — no migration items to merge for these.
+	mergeStrictTypesUsages(&result, forwardingCallUsages(pkgs, absRoot), nil)
 	return result, nil
 }
 
@@ -115,7 +120,7 @@ func forwardingCallUsages(pkgs []*packages.Package, absRoot string) []types.Flag
 // narrowly targeting interface satisfaction, means every existing Phase 1
 // detection mechanism gains type-backed coverage uniformly for free — not
 // just the one pattern this pass was originally written for.
-func strictTypesUsages(pkgs []*packages.Package, absRoot string) []types.FlagUsage {
+func strictTypesUsages(pkgs []*packages.Package, absRoot string) ([]types.FlagUsage, []types.MigrationInventoryItem) {
 	var fset *token.FileSet
 	var parsed []parsedFile
 	for _, pkg := range pkgs {
@@ -134,17 +139,27 @@ func strictTypesUsages(pkgs []*packages.Package, absRoot string) []types.FlagUsa
 			if err != nil {
 				continue
 			}
+			// Read separately from go/packages' own loading (a second read
+			// of a file already-parsed) — migrationInventory needs each
+			// call/argument's exact source text, which go/packages' parsed
+			// ASTs don't retain any more than Scan's own parser.ParseFile
+			// does. A read failure here isn't reported as a scan warning:
+			// it only degrades this one file's migrationInventory items to
+			// missing expression text (exprText's nil-src bounds check
+			// handles that safely), never the FlagUsage detection itself.
+			src, _ := os.ReadFile(pos.Filename)
 			parsed = append(parsed, parsedFile{
 				relPath:   rel,
 				dir:       filepath.Dir(pos.Filename),
 				file:      file,
+				src:       src,
 				imports:   traceSDKImports(file),
 				typesInfo: pkg.TypesInfo,
 			})
 		}
 	}
 	if len(parsed) == 0 {
-		return nil
+		return nil, nil
 	}
 	sort.Slice(parsed, func(i, j int) bool { return parsed[i].relPath < parsed[j].relPath })
 	return runWholeScanAnalysis(fset, parsed)
@@ -169,7 +184,15 @@ func strictTypesUsages(pkgs []*packages.Package, absRoot string) []types.FlagUsa
 // found via independent review, reproduced directly (two same-flag-key
 // call sites in one file, one Phase-1-visible, one interface-satisfaction-
 // only: the second vanished with no warning).
-func mergeStrictTypesUsages(result *types.ScanResult, extra []types.FlagUsage) {
+// extraMigrationItems, when non-nil, is index-aligned with extra (both
+// built by the same runWholeScanAnalysis/detect() walk, in the same
+// order) — the migration item for extra[i] is extraMigrationItems[i] if
+// present. forwardingCallUsages has no migration-item equivalent at all
+// (its call sites don't directly show the LD method's own (key, context,
+// fallback) arguments — see MigrationInventory's doc comment, types.go),
+// so its caller passes nil here; the length check below just means no
+// item is merged for any of its usages, never a panic.
+func mergeStrictTypesUsages(result *types.ScanResult, extra []types.FlagUsage, extraMigrationItems []types.MigrationInventoryItem) {
 	if len(extra) == 0 {
 		return
 	}
@@ -181,7 +204,8 @@ func mergeStrictTypesUsages(result *types.ScanResult, extra []types.FlagUsage) {
 		seen[callSiteKey(u)] = true
 	}
 	added := false
-	for _, u := range extra {
+	migrationAdded := false
+	for i, u := range extra {
 		key := callSiteKey(u)
 		if seen[key] {
 			continue
@@ -195,6 +219,22 @@ func mergeStrictTypesUsages(result *types.ScanResult, extra []types.FlagUsage) {
 		u.DetectedBy = "strict-types"
 		result.Usages = append(result.Usages, u)
 		added = true
+		if i < len(extraMigrationItems) {
+			result.MigrationInventory = append(result.MigrationInventory, extraMigrationItems[i])
+			migrationAdded = true
+		}
+	}
+	if migrationAdded {
+		sort.Slice(result.MigrationInventory, func(i, j int) bool {
+			a, b := result.MigrationInventory[i], result.MigrationInventory[j]
+			if a.File != b.File {
+				return a.File < b.File
+			}
+			if a.Line != b.Line {
+				return a.Line < b.Line
+			}
+			return a.Column < b.Column
+		})
 	}
 	if !added {
 		return

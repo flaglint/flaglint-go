@@ -219,7 +219,9 @@ func TestCLI_emptyScanProducesEmptyArraysNotNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scan failed: %v", err)
 	}
-	for _, field := range []string{`"uniqueFlags":null`, `"usages":null`, `"warnings":null`} {
+	// json.MarshalIndent inserts a space after the colon, so the check must
+	// match that exactly, not compact-JSON spacing.
+	for _, field := range []string{`"uniqueFlags": null`, `"usages": null`, `"warnings": null`, `"migrationInventory": null`} {
 		if strings.Contains(string(out), field) {
 			t.Errorf("output contains %q — empty results must serialize as [], not null:\n%s", field, out)
 		}
