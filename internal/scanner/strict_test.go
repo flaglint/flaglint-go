@@ -70,6 +70,23 @@ func TestScanStrict_positiveInterfaceSatisfaction(t *testing.T) {
 			t.Errorf("usage %+v SDK = %q, want go-server-sdk-v7", u, u.SDK)
 		}
 	}
+
+	// Interface-satisfaction usages go through the same detect() call-
+	// argument extraction as any Phase 1 usage (only how the receiver's
+	// identity gets proven differs — the call site itself is an ordinary
+	// e.BoolVariation(key, ctx, default)), so they get full
+	// MigrationInventoryItems too, not just FlagUsages.
+	if len(strict.MigrationInventory) != len(strict.Usages) {
+		t.Fatalf("MigrationInventory has %d item(s), want %d (one per usage): %+v", len(strict.MigrationInventory), len(strict.Usages), strict.MigrationInventory)
+	}
+	for _, item := range strict.MigrationInventory {
+		if item.CallExpression == "" {
+			t.Errorf("item %+v has no CallExpression", item)
+		}
+		if item.ValueType != types.MigrationValueBoolean {
+			t.Errorf("item %+v ValueType = %q, want boolean", item, item.ValueType)
+		}
+	}
 }
 
 func TestScanStrict_positiveTransitiveFactoryWrapping(t *testing.T) {
@@ -196,6 +213,15 @@ func TestScanStrict_positiveForwardingCall(t *testing.T) {
 		if !found {
 			t.Errorf("missing expected usage for flag key %q", k)
 		}
+	}
+
+	// A forwarding-function call site (e.g. callDirect(client.BoolVariation,
+	// key, def)) doesn't directly show the LD method's own (key, context,
+	// fallback) arguments the way a migrate rewrite would need — deliberately
+	// excluded from MigrationInventory (see its doc comment, types.go), so
+	// none of these 3 strict-types-only usages should have produced one.
+	if len(strict.MigrationInventory) != 0 {
+		t.Errorf("MigrationInventory = %+v, want empty — forwarding-call usages have no migration item", strict.MigrationInventory)
 	}
 }
 

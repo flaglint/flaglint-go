@@ -140,6 +140,30 @@ have:
 audit does not yet implement staleness heuristics (keyword/path/minFileCount).
 This is a placeholder for parity, not a promise it will be populated soon.
 
+`ScanResult.migrationInventory` mirrors flaglint-js's `MigrationInventoryItem`
+field-for-field (`file`, `line`, `column`, `launchDarklyMethod`,
+`callExpression`, `rangeStart`, `rangeEnd`, `flagKeyExpression`,
+`staticFlagKey`, `isDynamic`, `valueType`, `fallbackExpression`,
+`evaluationContextExpression`, `safelyAutomatable`, `manualReviewReason`) —
+richer, migration-focused detail a future `migrate` command would need to
+safely rewrite a call, not just report it (flaglint-go has no `migrate`
+command yet — see ADR 002's Phase 1 scope). One deliberate omission:
+flaglint-js's `isAwaited?: boolean` has no Go equivalent (no async/await) and
+is never emitted. Unlike flaglint-js (whose generic `variation()`/
+`isFeatureEnabled()` calls require inferring `valueType` from the fallback
+argument's runtime type), every Go SDK method name is already type-specific,
+so `valueType` is always derived directly from the method name — flaglint-go
+never actually produces `"unknown-fallback"` as a `manualReviewReason` as a
+result (kept in the type for cross-tool consistency regardless). A
+`--strict-types`-only usage detected via the "forwarding function" pattern
+(ADR 006) has no corresponding `migrationInventory` item: its call site
+doesn't directly show the LD method's own `(key, context, fallback)`
+arguments, so an item for it would misrepresent what's actually safe to
+rewrite. Every other usage — Phase 1 and interface-satisfaction/transitive-
+factory-wrapping `--strict-types` findings alike — gets one, since their call
+sites are all ordinary `client.Method(key, context, fallback)` shapes
+regardless of how the receiver's identity was proven.
+
 ## Consequences
 
 - Any PR to flaglint-go that changes fingerprint format, exit codes, config
