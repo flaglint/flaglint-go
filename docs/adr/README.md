@@ -10,3 +10,4 @@ Never delete or edit a past ADR. Add a new one to supersede it.
 | [003](003-cross-tool-contract.md) | Cross-Tool Contract with flaglint-js |
 | [004](004-whole-scan-identity-resolution.md) | Whole-Scan Identity Resolution (Phase 1.5) |
 | [005](005-strict-types-pass.md) | `--strict-types`: Type-Checked Identity Resolution (Phase 2) |
+| [006](006-interprocedural-method-values.md) | Phase 2b: Interprocedural Method-Value Propagation |
