@@ -115,6 +115,37 @@ func TestScanFile_positiveCompositeLiteral(t *testing.T) {
 	}
 }
 
+func TestScanFile_positiveStructFieldDeclaredTypeOnly(t *testing.T) {
+	// A struct field declared *ld.LDClient, never assigned or composite-
+	// literal-bound anywhere in the scanned tree (flaglint/corpus:
+	// struct-field-receiver) — the field's declared type alone must be
+	// sufficient proof, same soundness as paramClientBindings already
+	// relies on for function parameters.
+	usages := parseFixture(t, "positive_struct_field_declared_type_only.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want exactly 1 (the unrelated string field must not be detected): %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "declared-type-only-flag" {
+		t.Errorf("usages[0] = %+v, want declared-type-only-flag", got)
+	}
+}
+
+func TestScanFile_positivePackageLevelCompositeLiteral(t *testing.T) {
+	// A package-level composite literal (`var svcWrapper = &SvcWrapper{
+	// Client: svcClient}`), never inside any function body — Pass B
+	// previously only walked function scopes (flaglint/corpus:
+	// composite-literal-binding). Also proves a chain rooted at a bare
+	// package-level identifier (not a function parameter/receiver)
+	// resolves at the call site.
+	usages := parseFixture(t, "positive_package_level_composite_literal.go")
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want exactly 1 (the unrelated wrapper's string field must not be detected): %+v", len(usages), usages)
+	}
+	if got := usages[0]; got.FlagKey != "package-level-composite-literal-flag" {
+		t.Errorf("usages[0] = %+v, want package-level-composite-literal-flag", got)
+	}
+}
+
 func TestScanFile_falsePositiveCompositeLiteralUnbound(t *testing.T) {
 	usages := parseFixture(t, "false_positive_composite_literal_unbound.go")
 	if len(usages) != 0 {

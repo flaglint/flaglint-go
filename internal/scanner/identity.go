@@ -123,6 +123,14 @@ type fileContext struct {
 	// multi-level field-selector chains one hop at a time.
 	structFieldTypes map[string]string
 
+	// packageVarTypes is the whole-scan index of "VarName" -> declared/
+	// inferred type name for package-level vars (see collectPackageVarTypes,
+	// structtypes.go) — lets a chain rooted at a package-level variable
+	// (`svc.Client.BoolVariation(...)`, svc a package var, not a function
+	// parameter/receiver) resolve at all; resolveChainType otherwise only
+	// ever knows about the enclosing function's own declared parameter types.
+	packageVarTypes map[string]string
+
 	// typesInfo is real go/types information for this file's package, only
 	// populated by the opt-in --strict-types pass (ScanStrict, strict.go) —
 	// nil for an ordinary Scan. See resolveAssignedBinding's fallback and
@@ -185,7 +193,11 @@ func collectFieldBindings(file *ast.File, ctx fileContext) map[string]string {
 		if !ok || fn.Body == nil {
 			continue
 		}
-		declared := declaredParamTypes(fn)
+		// packageVarTypes merged in first (mergeBindings's later argument
+		// wins on collision) so a local parameter of the same name
+		// correctly shadows a package-level variable's type, matching real
+		// Go scoping — see fileContext.packageVarTypes.
+		declared := mergeBindings(ctx.packageVarTypes, declaredParamTypes(fn))
 
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			assign, ok := n.(*ast.AssignStmt)
@@ -617,6 +629,47 @@ func compositeLiteralFieldBindings(lit *ast.CompositeLit, knownBindings map[stri
 		bindings[typeName+"."+fieldIdent.Name] = version
 	}
 	return bindings
+}
+
+// packageLevelCompositeLiterals returns every *ast.CompositeLit appearing
+// in a package-level `var` declaration's initializer expression(s) in
+// file — including one wrapped in `&Type{...}` (Go's address-of syntax
+// for a composite literal): ast.Inspect walks into the wrapper
+// regardless, so the inner literal is found either way.
+//
+// Found missing during corpus testing (flaglint/corpus:
+// composite-literal-binding): compositeLiteralFieldBindings itself is
+// entirely agnostic to where a literal appears syntactically — it only
+// needs the literal node and whatever knownBindings map is in scope at
+// that point — but runWholeScanAnalysis's Pass B only ever walked
+// *function* scopes (collectFuncScopes/walkScoped), so a literal directly
+// initializing a package-level var (`var svc = &Svc{Client: svcClient}`,
+// never inside any function body at all) was never visited. Root-caused
+// during issue #18's Pass B fixed-point fix but never filed as its own
+// issue at the time.
+func packageLevelCompositeLiterals(file *ast.File) []*ast.CompositeLit {
+	var lits []*ast.CompositeLit
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, val := range vs.Values {
+				ast.Inspect(val, func(n ast.Node) bool {
+					if lit, ok := n.(*ast.CompositeLit); ok {
+						lits = append(lits, lit)
+					}
+					return true
+				})
+			}
+		}
+	}
+	return lits
 }
 
 // mergeBindings returns a new map containing every entry from both inputs;

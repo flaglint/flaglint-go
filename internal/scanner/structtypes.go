@@ -1,6 +1,9 @@
 package scanner
 
-import "go/ast"
+import (
+	"go/ast"
+	"go/token"
+)
 
 // collectStructFieldTypes walks top-level `type X struct { ... }`
 // declarations in file and returns "StructName.FieldName" -> the field's
@@ -42,6 +45,73 @@ func collectStructFieldTypes(file *ast.File) map[string]string {
 				for _, name := range f.Names {
 					types[ts.Name.Name+"."+name.Name] = fieldType
 				}
+			}
+		}
+	}
+	return types
+}
+
+// collectPackageVarTypes returns "VarName" -> declared/inferred type name
+// for every package-level `var` declaration in file — either from an
+// explicit type annotation (`var svc Svc`) or inferred from a composite-
+// literal initializer's own type (`var svc = &Svc{...}` or `var svc =
+// Svc{...}` — ast.Inspect finds the literal either way, regardless of
+// address-of wrapping).
+//
+// Found missing during corpus testing (flaglint/corpus:
+// composite-literal-binding): resolveChainType (identity.go) only ever
+// consulted the enclosing function's own declared parameter/receiver
+// types for a bare identifier — a chain rooted at a *package-level*
+// variable (`svc.Client.BoolVariation(...)` called from an ordinary
+// function, not a method on Svc) always came up empty, since nothing
+// recorded what type "svc" itself was.
+func collectPackageVarTypes(file *ast.File) map[string]string {
+	types := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if vs.Type != nil {
+				typeName := simpleTypeName(vs.Type)
+				if typeName == "" {
+					continue
+				}
+				for _, name := range vs.Names {
+					if name.Name != "_" {
+						types[name.Name] = typeName
+					}
+				}
+				continue
+			}
+			for i, name := range vs.Names {
+				if name.Name == "_" || i >= len(vs.Values) {
+					continue
+				}
+				var lit *ast.CompositeLit
+				ast.Inspect(vs.Values[i], func(n ast.Node) bool {
+					if lit != nil {
+						return false
+					}
+					if l, ok := n.(*ast.CompositeLit); ok {
+						lit = l
+						return false
+					}
+					return true
+				})
+				if lit == nil {
+					continue
+				}
+				typeName := simpleTypeName(lit.Type)
+				if typeName == "" {
+					continue
+				}
+				types[name.Name] = typeName
 			}
 		}
 	}
