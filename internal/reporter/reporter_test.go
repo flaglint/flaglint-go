@@ -38,6 +38,9 @@ func TestRender_json(t *testing.T) {
 	if decoded["generatedAt"] != "2026-07-06T00:00:00Z" {
 		t.Errorf("generatedAt = %v, want scannedAt value", decoded["generatedAt"])
 	}
+	if decoded["schemaVersion"] != "scan-result.v1" {
+		t.Errorf("schemaVersion = %v, want scan-result.v1 (flaglint/spec's scan-result.v1.schema.json)", decoded["schemaVersion"])
+	}
 	if decoded["scannedAt"] != "2026-07-06T00:00:00Z" {
 		t.Errorf("scannedAt = %v, want present at top level (spread, not nested)", decoded["scannedAt"])
 	}

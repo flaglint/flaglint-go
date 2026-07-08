@@ -362,6 +362,54 @@ func RunMore() {
 	}
 }
 
+func TestCLI_baselineRatchetHole_duplicateCallExceedsBaselinedCount(t *testing.T) {
+	// The v1 fingerprint's known static-collision limitation
+	// (spec/fingerprint.md in flaglint/spec): two call sites sharing
+	// (callType, flagKey, file) share one fingerprint string. Before the
+	// baseline "counts" extension, a brand-new *duplicate* of an
+	// already-baselined call was invisible to --fail-on-new, since the
+	// fingerprint was already in the known set — copy-paste is exactly
+	// how flag debt spreads, so this was a real ratchet hole, not a
+	// theoretical one. This test proves it's closed.
+	dir := t.TempDir()
+	writeGoFile(t, filepath.Join(dir, "flags.go"), sampleService)
+	baselinePath := filepath.Join(dir, "baseline.json")
+
+	if err := exec.Command(binPath, "audit", dir, "--write-baseline", baselinePath).Run(); err != nil {
+		t.Fatalf("audit --write-baseline failed: %v", err)
+	}
+
+	// A second, identically-shaped call in the SAME file — same callType,
+	// flagKey, and file, so it shares checkout-v2's exact v1 fingerprint
+	// with the one already baselined at count 1.
+	writeGoFile(t, filepath.Join(dir, "flags.go"), `package svc
+
+import (
+	"time"
+
+	ld "github.com/launchdarkly/go-server-sdk/v7"
+)
+
+func Run() {
+	client, _ := ld.MakeClient("sdk-key", 5*time.Second)
+	_, _ = client.BoolVariation("checkout-v2", nil, false)
+	_, _ = client.BoolVariation("checkout-v2", nil, false)
+}
+`)
+
+	cmd := exec.Command(binPath, "validate", dir, "--baseline", baselinePath, "--fail-on-new")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError for a new duplicate call exceeding its baselined count, got %v (stderr: %s)", err, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1 (stderr: %s)", exitErr.ExitCode(), stderr.String())
+	}
+}
+
 func TestCLI_validate_malformedBaselineExits2(t *testing.T) {
 	dir := t.TempDir()
 	writeGoFile(t, filepath.Join(dir, "flags.go"), sampleService)
