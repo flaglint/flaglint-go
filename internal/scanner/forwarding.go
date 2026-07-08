@@ -67,18 +67,21 @@ type evalSummary struct {
 	keyCandidates map[int]keySource
 }
 
-// accessorKey identifies a method by its receiver's simple type name and
-// the method name itself — not by *types.Func identity. A call through
-// an interface-typed expression (`flag.Key()` where flag typedFlag[T])
-// resolves via go/types to the *interface's* abstract method object, a
-// completely different *types.Func than the concrete type's own
-// implementation (`func (f BoolFlag) Key() string {...}`) — even though
-// at runtime it's the concrete implementation that actually runs. Since
-// only the concrete implementation has a body to learn which field it
-// reads from, and the concrete type is only known once a real value
-// reaches a call site, matching by (type name, method name) instead of
-// object identity is what lets a later concrete value's type be looked
-// up directly.
+// accessorKey identifies a method by its receiver's package-qualified
+// type name and the method name itself — not by *types.Func identity. A
+// call through an interface-typed expression (`flag.Key()` where flag
+// typedFlag[T]) resolves via go/types to the *interface's* abstract
+// method object, a completely different *types.Func than the concrete
+// type's own implementation (`func (f BoolFlag) Key() string {...}`) —
+// even though at runtime it's the concrete implementation that actually
+// runs. Since only the concrete implementation has a body to learn which
+// field it reads from, and the concrete type is only known once a real
+// value reaches a call site, matching by (type name, method name)
+// instead of object identity is what lets a later concrete value's type
+// be looked up directly. typeName is package-qualified (pkgPath + "." +
+// name) specifically to rule out two unrelated same-named types in
+// different packages of the scanned repo colliding on this key — found
+// during independent review of the same-name-only version.
 type accessorKey struct {
 	typeName   string
 	methodName string
@@ -87,11 +90,11 @@ type accessorKey struct {
 // accessorFields finds every method shaped exactly like `func (recv S)
 // MethodName() string { return recv.field }` — a trivial, single-
 // statement field accessor, across every loaded package. Keyed by
-// accessorKey{S, MethodName} so a later call through a value of concrete
-// type S can be resolved straight back to which field it reads, even
-// when the call site's own static type is an interface S merely
+// accessorKey{pkgPath.S, MethodName} so a later call through a value of
+// concrete type S can be resolved straight back to which field it reads,
+// even when the call site's own static type is an interface S merely
 // satisfies.
-func accessorFields(files []*ast.File) map[accessorKey]string {
+func accessorFields(files []*ast.File, pkgPath string) map[accessorKey]string {
 	result := map[accessorKey]string{}
 	for _, file := range files {
 		for _, decl := range file.Decls {
@@ -121,7 +124,7 @@ func accessorFields(files []*ast.File) map[accessorKey]string {
 			if recvType == "" {
 				continue
 			}
-			result[accessorKey{typeName: recvType, methodName: fn.Name.Name}] = sel.Sel.Name
+			result[accessorKey{typeName: pkgPath + "." + recvType, methodName: fn.Name.Name}] = sel.Sel.Name
 		}
 	}
 	return result
@@ -532,10 +535,12 @@ func calleeFuncObject(fun ast.Expr, info *gotypes.Info) *gotypes.Func {
 	}
 }
 
-// namedTypeName returns t's simple name if it (or the type it points to)
-// is a defined (named) type — "" otherwise. Used to resolve a concrete
-// value's type name for an accessorKey lookup, mirroring simpleTypeName's
-// AST-level unwrapping but operating on a real go/types.Type instead.
+// namedTypeName returns t's package-qualified name (pkgPath + "." +
+// name) if it (or the type it points to) is a defined (named) type —
+// "" otherwise. Used to resolve a concrete value's type name for an
+// accessorKey lookup — package-qualified to match accessorFields' own
+// keying, so two unrelated same-named types in different packages of the
+// scanned repo can never collide.
 func namedTypeName(t gotypes.Type) string {
 	if ptr, ok := t.(*gotypes.Pointer); ok {
 		t = ptr.Elem()
@@ -544,7 +549,11 @@ func namedTypeName(t gotypes.Type) string {
 	if !ok {
 		return ""
 	}
-	return named.Obj().Name()
+	pkg := named.Obj().Pkg()
+	if pkg == nil {
+		return ""
+	}
+	return pkg.Path() + "." + named.Obj().Name()
 }
 
 // resolveFlagDescriptorKey resolves the static flag key for arg (the

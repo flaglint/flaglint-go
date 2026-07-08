@@ -82,7 +82,7 @@ func forwardingCallUsages(pkgs []*packages.Package, absRoot string) []types.Flag
 		if fset == nil {
 			fset = pkg.Fset
 		}
-		for k, v := range accessorFields(pkg.Syntax) {
+		for k, v := range accessorFields(pkg.Syntax, pkg.PkgPath) {
 			accessors[k] = v
 		}
 		for k, v := range factoryFieldParams(pkg.Syntax, pkg.TypesInfo) {
