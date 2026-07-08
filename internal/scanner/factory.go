@@ -116,6 +116,54 @@ func paramClientBindings(fl *ast.FieldList, imports sdkImports) map[string]strin
 	return bindings
 }
 
+// collectDeclaredClientFields returns "StructName.FieldName" -> SDK
+// version for every struct field in file whose *declared type* is
+// directly `*<alias>.LDClient` — the same "trust the signature, no build
+// required" principle paramClientBindings already applies to function
+// parameters, applied here to struct fields instead. Sound for the
+// identical reason: Go's own type system guarantees such a field can
+// only ever hold an SDK client (or nil), so no assignment or composite
+// literal needs to be observed anywhere in the scanned tree for this to
+// be safe.
+//
+// Found missing during corpus testing (flaglint/corpus:
+// struct-field-receiver): the dominant Go dependency-injection pattern is
+// a client field wired up by an external framework, or a constructor not
+// included in what's actually scanned — there is no assignment to trace
+// at all, exactly the gap paramClientBindings already closed for
+// parameters, just never extended to fields.
+func collectDeclaredClientFields(file *ast.File, imports sdkImports) map[string]string {
+	bindings := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok || st.Fields == nil {
+				continue
+			}
+			for _, f := range st.Fields.List {
+				version, ok := starLDClientType(f.Type, imports)
+				if !ok {
+					continue
+				}
+				for _, name := range f.Names {
+					if name.Name != "_" {
+						bindings[ts.Name.Name+"."+name.Name] = version
+					}
+				}
+			}
+		}
+	}
+	return bindings
+}
+
 // collectFactoryFunctions registers every free function (no receiver —
 // methods are out of scope here) in file whose declared return type
 // resolves to the SDK client type, keyed by pkgKey so cross-package call

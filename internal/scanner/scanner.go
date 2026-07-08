@@ -167,19 +167,28 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 	// granularity. Bare identifiers are never visible outside their own
 	// package in real Go anyway, so this partitioning also just matches
 	// actual Go semantics.
+	// packageVarTypesByPkg (per-package, same reason as structFieldTypesByPkg
+	// above) is the "VarName" -> declared/inferred type index that lets a
+	// chain rooted at a package-level variable resolve at all — see
+	// collectPackageVarTypes, structtypes.go.
 	structFieldTypesByPkg := map[string]map[string]string{}
+	packageVarTypesByPkg := map[string]map[string]string{}
 	factoryFunctions := map[factoryKey]string{}
 	for _, pf := range parsed {
 		pkg := pkgBindings(structFieldTypesByPkg, ownPkgKey[pf.file])
 		for k, v := range collectStructFieldTypes(pf.file) {
 			pkg[k] = v
 		}
+		varTypes := pkgBindings(packageVarTypesByPkg, ownPkgKey[pf.file])
+		for k, v := range collectPackageVarTypes(pf.file) {
+			varTypes[k] = v
+		}
 		collectFactoryFunctions(pf.file, ownPkgKey[pf.file], pf.imports, factoryFunctions)
 	}
 
 	// Pre-pass 3: per-file contexts, now that every whole-scan index above
-	// is complete. Each file's structFieldTypes is scoped to its own
-	// package's partition only — see the comment above.
+	// is complete. Each file's structFieldTypes/packageVarTypes is scoped
+	// to its own package's partition only — see the comment above.
 	ctxs := make(map[*ast.File]fileContext, len(parsed))
 	for _, pf := range parsed {
 		ctxs[pf.file] = fileContext{
@@ -188,6 +197,7 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 			importAliases:    resolveImportAliases(pf.file, importPathToPkgKey, importPathToPkgName),
 			factoryFunctions: factoryFunctions,
 			structFieldTypes: pkgBindings(structFieldTypesByPkg, ownPkgKey[pf.file]),
+			packageVarTypes:  pkgBindings(packageVarTypesByPkg, ownPkgKey[pf.file]),
 			typesInfo:        pf.typesInfo,
 		}
 	}
@@ -205,6 +215,7 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 	// unqualified identifier is only ever visible within its own package.
 	base := map[string]map[string]string{}
 	fileScopes := make(map[*ast.File][]funcScope, len(parsed))
+	packageLits := make(map[*ast.File][]*ast.CompositeLit, len(parsed))
 	for _, pf := range parsed {
 		ctx := ctxs[pf.file]
 		pkg := pkgBindings(base, ctx.ownPkgKey)
@@ -214,7 +225,20 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 		for k, v := range collectFieldBindings(pf.file, ctx) {
 			pkg[k] = v
 		}
+		// Declared-type-alone field bindings (no assignment/composite
+		// literal needs to be observed anywhere — see
+		// collectDeclaredClientFields, factory.go) never lose to an
+		// observed binding above, but also never override one: both
+		// sources always agree on the version for valid Go code (a
+		// field's declared type is fixed), so only fill in what isn't
+		// already there.
+		for k, v := range collectDeclaredClientFields(pf.file, ctx.imports) {
+			if _, exists := pkg[k]; !exists {
+				pkg[k] = v
+			}
+		}
 		fileScopes[pf.file] = collectFuncScopes(pf.file, ctx.imports)
+		packageLits[pf.file] = packageLevelCompositeLiterals(pf.file)
 	}
 
 	// Pass B: composite-literal field bindings (`&LDIntegration{ldClient:
@@ -238,11 +262,25 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 	// legitimately be deeper than the number of files in the scan, so
 	// hitting the cap without converging would only be possible from a
 	// bug, not real code.
+	//
+	// Package-level composite literals (`var svc = &Svc{Client:
+	// svcClient}`) are processed in the same loop, using pkg itself as the
+	// known-bindings context — there's no function-local scope at package
+	// level, so a literal's field values can only ever reference other
+	// package-level bindings, which is exactly what pkg already holds.
 	for sweep := 0; sweep <= len(parsed); sweep++ {
 		changed := false
 		for _, pf := range parsed {
 			ctx := ctxs[pf.file]
 			pkg := pkgBindings(base, ctx.ownPkgKey)
+			for _, lit := range packageLits[pf.file] {
+				for k, v := range compositeLiteralFieldBindings(lit, pkg, ctx) {
+					if existing, ok := pkg[k]; !ok || existing != v {
+						pkg[k] = v
+						changed = true
+					}
+				}
+			}
 			for _, s := range fileScopes[pf.file] {
 				walkScoped(s.body, mergeBindings(pkg, s.paramBindings), ctx, func(n ast.Node, current map[string]string, _ map[string]methodValueBinding) {
 					lit, ok := n.(*ast.CompositeLit)
@@ -272,7 +310,12 @@ func runWholeScanAnalysis(fset *token.FileSet, parsed []parsedFile) []types.Flag
 		pkg := pkgBindings(base, ctx.ownPkgKey)
 		d := &fileDetector{fset: fset, relPath: pf.relPath}
 		for _, s := range fileScopes[pf.file] {
-			d.detect(s.body, mergeBindings(pkg, s.paramBindings), s.declared, ctx.structFieldTypes, ctx)
+			// packageVarTypes merged in first (mergeBindings's later
+			// argument wins on collision) so a local parameter of the
+			// same name correctly shadows a package-level variable's type
+			// — see fileContext.packageVarTypes.
+			declared := mergeBindings(ctx.packageVarTypes, s.declared)
+			d.detect(s.body, mergeBindings(pkg, s.paramBindings), declared, ctx.structFieldTypes, ctx)
 		}
 		allUsages = append(allUsages, d.usages...)
 	}
