@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/flaglint/flaglint-go/internal/config"
+	"github.com/flaglint/flaglint-go/internal/types"
 )
 
 func TestScanStrict_positiveInterfaceSatisfaction(t *testing.T) {
@@ -133,6 +134,118 @@ func TestScanStrict_positiveTransitiveFactoryWrapping(t *testing.T) {
 		if !found {
 			t.Errorf("missing expected usage for flag key %q", k)
 		}
+	}
+}
+
+func TestScanStrict_positiveForwardingCall(t *testing.T) {
+	// Issue #26 (ADR 006): a method value captured in one function,
+	// passed as an argument, and invoked from inside a different callee
+	// ("forwarding function") — the harder remainder after #6 fixed the
+	// same-scope case. Covers: a non-generic forwarding function, a
+	// generic one matching the issue's exact repro (proving
+	// findEvalSummaries resolves the pre-instantiation *types.Func, not a
+	// per-call-site instantiated wrapper), a one-hop "pass-through"
+	// function (fixes the SDK method internally, forwards only its own
+	// key parameter — the simplified version of the real e2b-dev/infra
+	// shape), a false-positive guard (unrelated same-shaped method
+	// value), and a genuinely dynamic (non-literal) key guard.
+	dir := "testdata/strict/forwarding_call"
+	cfg := config.Config{
+		Include:  []string{"**/*.go"},
+		Exclude:  []string{"**/vendor/**", "**/.git/**"},
+		Provider: "launchdarkly",
+	}
+
+	phase1, err := Scan(dir, cfg)
+	if err != nil {
+		t.Fatalf("Scan error = %v", err)
+	}
+	if len(phase1.Usages) != 0 {
+		t.Fatalf("Scan (Phase 1) found %d usage(s), want 0 — a method value crossing a function boundary is exactly what Phase 1 cannot see: %+v", len(phase1.Usages), phase1.Usages)
+	}
+
+	strict, err := ScanStrict(dir, cfg)
+	if err != nil {
+		t.Fatalf("ScanStrict error = %v", err)
+	}
+	if len(strict.Warnings) != 0 {
+		t.Fatalf("ScanStrict warnings = %+v, want none — the fixture module builds cleanly", strict.Warnings)
+	}
+	if len(strict.Usages) != 3 {
+		t.Fatalf("ScanStrict found %d usage(s), want exactly 3 (should-not-be-detected and the genuinely dynamic-key call must both be absent): %+v", len(strict.Usages), strict.Usages)
+	}
+
+	wantFlagKeys := map[string]bool{"forwarding-direct-flag": false, "forwarding-generic-flag": false, "pass-through-flag": false}
+	for _, got := range strict.Usages {
+		if _, ok := wantFlagKeys[got.FlagKey]; !ok {
+			t.Errorf("unexpected usage %+v", got)
+			continue
+		}
+		wantFlagKeys[got.FlagKey] = true
+		if got.DetectedBy != "strict-types" {
+			t.Errorf("usage %q DetectedBy = %q, want strict-types", got.FlagKey, got.DetectedBy)
+		}
+		if got.IsDynamic {
+			t.Errorf("usage %q IsDynamic = true, want false", got.FlagKey)
+		}
+		if got.SDK != "go-server-sdk-v7" {
+			t.Errorf("usage %q SDK = %q, want go-server-sdk-v7", got.FlagKey, got.SDK)
+		}
+	}
+	for k, found := range wantFlagKeys {
+		if !found {
+			t.Errorf("missing expected usage for flag key %q", k)
+		}
+	}
+}
+
+func TestScanStrict_positiveFlagDescriptorChain(t *testing.T) {
+	// The real e2b-dev/infra shape found during --strict-types
+	// verification against that repo (issue #26's actual motivating
+	// case) — a package-level var (SnapshotFeatureFlag) built by a
+	// factory (NewBoolFlag) that stores a literal into a struct field,
+	// read back via a trivial accessor (Key), forwarded through TWO
+	// levels of function wrapping (Client.BoolFlag, a pass-through, then
+	// getFlag, a direct forwarding function) before reaching the SDK
+	// call. See testdata/strict/flag_descriptor/main.go and
+	// forwarding.go's package doc comment.
+	dir := "testdata/strict/flag_descriptor"
+	cfg := config.Config{
+		Include:  []string{"**/*.go"},
+		Exclude:  []string{"**/vendor/**", "**/.git/**"},
+		Provider: "launchdarkly",
+	}
+
+	phase1, err := Scan(dir, cfg)
+	if err != nil {
+		t.Fatalf("Scan error = %v", err)
+	}
+	if len(phase1.Usages) != 0 {
+		t.Fatalf("Scan (Phase 1) found %d usage(s), want 0: %+v", len(phase1.Usages), phase1.Usages)
+	}
+
+	strict, err := ScanStrict(dir, cfg)
+	if err != nil {
+		t.Fatalf("ScanStrict error = %v", err)
+	}
+	if len(strict.Warnings) != 0 {
+		t.Fatalf("ScanStrict warnings = %+v, want none — the fixture module builds cleanly", strict.Warnings)
+	}
+	if len(strict.Usages) != 1 {
+		t.Fatalf("ScanStrict found %d usage(s), want 1: %+v", len(strict.Usages), strict.Usages)
+	}
+	got := strict.Usages[0]
+	if got.FlagKey != "use-nfs-for-snapshots" {
+		t.Errorf("usages[0].FlagKey = %q, want use-nfs-for-snapshots", got.FlagKey)
+	}
+	if got.CallType != types.CallType("BoolVariationCtx") {
+		t.Errorf("usages[0].CallType = %q, want BoolVariationCtx", got.CallType)
+	}
+	if got.DetectedBy != "strict-types" {
+		t.Errorf("usages[0].DetectedBy = %q, want strict-types", got.DetectedBy)
+	}
+	if got.SDK != "go-server-sdk-v7" {
+		t.Errorf("usages[0].SDK = %q, want go-server-sdk-v7", got.SDK)
 	}
 }
 

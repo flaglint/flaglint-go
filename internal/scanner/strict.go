@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"go/token"
+	gotypes "go/types"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -55,7 +56,55 @@ func ScanStrict(root string, cfg config.Config) (types.ScanResult, error) {
 	}
 
 	mergeStrictTypesUsages(&result, strictTypesUsages(pkgs, absRoot))
+	mergeStrictTypesUsages(&result, forwardingCallUsages(pkgs, absRoot))
 	return result, nil
+}
+
+// forwardingCallUsages is issue #26's detection entry point (ADR 006,
+// extended — see forwarding.go's package doc comment for why): it builds
+// the whole-scan indices (accessor methods, factory-constructor field
+// sources, package-level flag-descriptor var literals, and the fixed-
+// point "which functions evaluate a flag through a forwarded/pass-through
+// callback" index) across every loaded package, then walks every loaded
+// package's syntax for call sites matching that shape. Kept separate from
+// strictTypesUsages/runWholeScanAnalysis, since none of this needs
+// scope-tracked bindings at all (resolveByStaticType queries go/types
+// directly for whatever expression it's given), unlike every other
+// Phase 1/2a detection mechanism.
+func forwardingCallUsages(pkgs []*packages.Package, absRoot string) []types.FlagUsage {
+	var fset *token.FileSet
+	accessors := map[accessorKey]string{}
+	factoryFields := map[*gotypes.Func]map[string]int{}
+	for _, pkg := range pkgs {
+		if pkg.Fset == nil || pkg.TypesInfo == nil {
+			continue
+		}
+		if fset == nil {
+			fset = pkg.Fset
+		}
+		for k, v := range accessorFields(pkg.Syntax) {
+			accessors[k] = v
+		}
+		for k, v := range factoryFieldParams(pkg.Syntax, pkg.TypesInfo) {
+			factoryFields[k] = v
+		}
+	}
+	if fset == nil {
+		return nil
+	}
+
+	literalVars := map[*gotypes.Var]map[string]string{}
+	for _, pkg := range pkgs {
+		if pkg.TypesInfo == nil {
+			continue
+		}
+		for k, v := range flagDescriptorLiterals(pkg.Syntax, pkg.TypesInfo, factoryFields) {
+			literalVars[k] = v
+		}
+	}
+
+	summaries := findEvalSummaries(pkgs)
+	return detectForwardingCallUsages(fset, pkgs, absRoot, summaries, accessors, literalVars, factoryFields)
 }
 
 // strictTypesUsages re-runs the whole-scan analysis over go/packages-loaded
